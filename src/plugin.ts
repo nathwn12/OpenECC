@@ -87,7 +87,6 @@ function detectLinter(cwd: string): string | null {
 }
 
 const editedFiles = new Set<string>()
-const pendingToolChanges = new Map<string, { path: string; type: "added" | "modified" }>()
 
 const runTestsTool = tool({
   description:
@@ -507,7 +506,6 @@ export const OpenECCPlugin: Plugin = async ({ client, directory, $, worktree }) 
 
     "session.deleted": async () => {
       editedFiles.clear()
-      pendingToolChanges.clear()
     },
 
     "shell.env": async () => {
