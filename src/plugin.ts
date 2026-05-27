@@ -461,20 +461,6 @@ export const OpenECCPlugin: Plugin = async ({ client, directory, $, worktree }) 
       if ((input.tool === "edit" || input.tool === "write") && filePath) {
         editedFiles.add(filePath)
       }
-
-      if (input.tool === "edit" && filePath?.match(/\.tsx?$/)) {
-        try {
-          await $`npx tsc --noEmit 2>&1`
-        } catch {
-          await client.app.log({
-            body: {
-              service: "openecc",
-              level: "warn" as const,
-              message: "TypeScript errors detected after edit — run `npx tsc --noEmit` to see details",
-            },
-          })
-        }
-      }
     },
 
     "session.idle": async () => {
