@@ -15,7 +15,7 @@
   ],
   "license": "MIT",
   "scripts": {
-    "bundle": "bun build src/plugin.ts --outfile .opencode/plugins/openecc.js --target bun",
+    "bundle": "bun build src/plugin.ts --outfile .opencode/plugins/openecc.js --target bun --external @opencode-ai/plugin",
     "clean": "if exist .opencode\\plugins\\openecc.js del .opencode\\plugins\\openecc.js"
   },
   "devDependencies": {
