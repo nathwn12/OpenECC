@@ -163,6 +163,36 @@ Types: feat, fix, refactor, docs, test, chore, perf, ci
 
 ---
 
+---
+
+## Delegation Enforcement (HARD RULES)
+
+These are NOT optional. Violations are bugs.
+
+### Tool Access Control
+OpenECC enforces tool-level delegation via system prompt injection and tool definition rewriting.
+
+**MAIN CONTEXT (TALK + DELEGATE only):**
+- `task` — spawn subagents for all discrete work
+- `skill` — discover and load domain skills
+- `todowrite` — track task progress
+- `question` — ask clarifying questions
+- `read`, `webfetch` — read-only context gathering (sparingly)
+
+**SUBAGENT CONTEXT ONLY (NEVER main context):**
+- `edit`, `write` — editing/creating source files (use `@builder`)
+- `bash` — running commands (use `@executor`)
+- `glob`, `grep` — searching the codebase (use `@explorer`)
+
+### Self-Audit Before Every Tool Call
+Before calling any tool, check:
+1. Does this tool modify files? → **Delegate via `task`**
+2. Does this tool run commands? → **Delegate via `task`**
+3. Does this tool search source code? → **Delegate via `task`**
+4. Am I doing work instead of delegating? → **STOP. Spawn a subagent.**
+
+---
+
 ## Available Tools
 
 | Tool | Purpose |

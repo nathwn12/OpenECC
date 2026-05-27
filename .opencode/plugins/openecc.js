@@ -1,13 +1,14 @@
+// @bun
 // src/plugin.ts
 import { tool } from "@opencode-ai/plugin";
-import * as path3 from "node:path";
-import { fileURLToPath } from "node:url";
-import * as fs3 from "node:fs";
-import { execSync } from "node:child_process";
+import * as path3 from "path";
+import { fileURLToPath } from "url";
+import * as fs3 from "fs";
+import { execSync } from "child_process";
 
 // src/routing/detect.ts
-import * as fs from "node:fs";
-import * as path from "node:path";
+import * as fs from "fs";
+import * as path from "path";
 function hasFile(dir, ...names) {
   for (const name of names) {
     if (fs.existsSync(path.join(dir, name)))
@@ -142,8 +143,8 @@ function detectProject(cwd) {
 }
 
 // src/routing/registry.ts
-import * as fs2 from "node:fs";
-import * as path2 from "node:path";
+import * as fs2 from "fs";
+import * as path2 from "path";
 var AGENT_TRIGGERS = {
   planner: { domain: "planning", keywords: ["plan", "planning", "architecture", "organize", "structure", "feature", "refactoring", "strategy", "roadmap"], permissions: { edit: "deny", write: "deny", task: "deny" } },
   architect: { domain: "planning", keywords: ["architecture", "design", "system", "scalability", "decision", "technical decision"], permissions: { edit: "deny", write: "deny", task: "deny" } },
@@ -394,28 +395,61 @@ var skillsDir = path3.resolve(__dirname2, "..", "skills");
 var agentsDir = path3.resolve(__dirname2, "..", "prompts", "agents");
 var commandsDir = path3.resolve(__dirname2, "..", "commands");
 var agentsMDPath = path3.resolve(__dirname2, "..", "..", "AGENTS.md");
+var DELEGATION_ENFORCEMENT = `## OpenECC Delegation Enforcement (HARD RULES)
+
+These are structural constraints, NOT suggestions. Violations are bugs.
+
+### Tool Access Control \u2014 Main Context (TALK + DELEGATE only)
+NEVER call these tools in main context. They must go through subagents:
+
+| Tool | Correct Usage | Delegate To |
+|------|--------------|-------------|
+| \`edit\` | Changes source files | @builder or language-specific subagent |
+| \`write\` | Creates/modifies files | @builder or language-specific subagent |
+| \`bash\` | Runs commands | @executor or language-specific subagent |
+| \`glob\` | Searches codebase | @explorer or task-specific subagent |
+| \`grep\` | Searches file contents | @explorer or task-specific subagent |
+
+### Self-Audit Before Every Tool Call
+Before calling ANY tool, ask:
+1. "Does this tool edit, write, or run commands?" \u2192 DELEGATE via \`task\` tool.
+2. "Does this tool search source code?" \u2192 DELEGATE via \`task\` tool.
+3. "Could a subagent do this in parallel while I handle something else?" \u2192 DELEGATE via \`task\` tool.
+4. "Am I about to do work directly instead of delegating?" \u2192 STOP. Spawn a subagent.
+
+If any answer is YES, use the \`task\` tool to spawn a subagent. No exceptions.`;
+var TOOL_ACCESS_BLOCK = `<structured type="tool_access">
+type: tool_access
+rule: Main context is TALK + DELEGATE only. Tools are partitioned by context.
+main_context_only:
+  allowed: [task, skill, todowrite, question, read, webfetch]
+  description: "Spawn subagents, load skills, track todos, gather context. NO source mutations."
+subagent_only:
+  allowed: [edit, write, bash, glob, grep]
+  description: "All source code work. NEVER called in main context."
+</structured>`;
 var DELEGATOR_ROLE = `## Your Role (OpenECC Delegator)
 
-Your primary job is to delegate, synthesize, and verify — not to do work directly.
+Your primary job is to delegate, synthesize, and verify \u2014 not to do work directly.
 
 ### When to delegate to a subagent (@mention):
-- Planning / architecture → @planner
-- Code review / quality → @code-reviewer
-- Security review → @security-reviewer
-- Build/type errors → @build-error-resolver
-- Test-first development → @tdd-guide
-- E2E tests → @e2e-runner
-- Documentation → @doc-updater / @docs-lookup
-- Dead code cleanup → @refactor-cleaner
-- Language-specific (Go/Rust/C++/Java/Kotlin/Python) → respective reviewer
-- Complex multi-step tasks → @planner (orchestrate mode)
+- Planning / architecture \u2192 @planner
+- Code review / quality \u2192 @code-reviewer
+- Security review \u2192 @security-reviewer
+- Build/type errors \u2192 @build-error-resolver
+- Test-first development \u2192 @tdd-guide
+- E2E tests \u2192 @e2e-runner
+- Documentation \u2192 @doc-updater / @docs-lookup
+- Dead code cleanup \u2192 @refactor-cleaner
+- Language-specific (Go/Rust/C++/Java/Kotlin/Python) \u2192 respective reviewer
+- Complex multi-step tasks \u2192 @planner (orchestrate mode)
 
 ### When to load a skill:
-- API design → skill tool → api-design
-- Backend patterns → skill tool → backend-patterns
-- Frontend patterns → skill tool → frontend-patterns
-- Testing patterns → skill tool → tdd-workflow / e2e-testing
-- Security review → skill tool → security-review
+- API design \u2192 skill tool \u2192 api-design
+- Backend patterns \u2192 skill tool \u2192 backend-patterns
+- Frontend patterns \u2192 skill tool \u2192 frontend-patterns
+- Testing patterns \u2192 skill tool \u2192 tdd-workflow / e2e-testing
+- Security review \u2192 skill tool \u2192 security-review
 
 ### When to answer directly:
 - Simple factual questions
@@ -424,9 +458,9 @@ Your primary job is to delegate, synthesize, and verify — not to do work direc
 - Anything that requires zero tools
 
 ### Completion protocol:
-1. **Verify before claiming** — run the command, read the output, then speak
-2. **Synthesize** — distill subagent results into 3-5 sentences max
-3. **Signature** — end with \`---\` and a brief status summary`;
+1. **Verify before claiming** \u2014 run the command, read the output, then speak
+2. **Synthesize** \u2014 distill subagent results into 3-5 sentences max
+3. **Signature** \u2014 end with \`---\` and a brief status summary`;
 var QUICK_ROUTING = `### Quick Routing
 Task \\u2192 Subagent:
   plan/architect   \\u2192 @planner
@@ -484,14 +518,14 @@ function buildProjectProfileSection(p) {
   for (const lang of p.languages) {
     const agents = langAgentMap[lang] || [];
     for (const agent of agents) {
-      subagentLines.push(`- @${agent} — ${lang} code detected`);
+      subagentLines.push(`- @${agent} \u2014 ${lang} code detected`);
     }
   }
   for (const tf of p.testFrameworks) {
     if (tf === "jest" || tf === "vitest")
-      subagentLines.push("- @tdd-guide — tests detected");
+      subagentLines.push("- @tdd-guide \u2014 tests detected");
     if (tf === "playwright")
-      subagentLines.push("- @e2e-runner — Playwright detected");
+      subagentLines.push("- @e2e-runner \u2014 Playwright detected");
   }
   if (subagentLines.length > 0) {
     lines.push("### Priority Subagents");
@@ -501,16 +535,16 @@ function buildProjectProfileSection(p) {
   const skillLines = [];
   for (const fw of p.frameworks) {
     if (fw === "nextjs")
-      skillLines.push("- frontend-patterns — Next.js framework");
+      skillLines.push("- frontend-patterns \u2014 Next.js framework");
     if (fw === "angular")
-      skillLines.push("- angular-best-practices — Angular framework");
+      skillLines.push("- angular-best-practices \u2014 Angular framework");
   }
   if (p.testFrameworks.includes("playwright"))
-    skillLines.push("- e2e-testing — Playwright detected");
+    skillLines.push("- e2e-testing \u2014 Playwright detected");
   if (p.testFrameworks.some((t) => t === "jest" || t === "vitest"))
-    skillLines.push("- tdd-workflow — tests detected");
+    skillLines.push("- tdd-workflow \u2014 tests detected");
   if (p.languages.some((l) => l === "javascript" || l === "typescript")) {
-    skillLines.push("- backend-patterns — JS/TS backend support");
+    skillLines.push("- backend-patterns \u2014 JS/TS backend support");
   }
   if (skillLines.length > 0) {
     lines.push("### Recommended Skills");
@@ -858,6 +892,17 @@ var OpenECCPlugin = async ({ client, directory, $, worktree }) => {
     { name: "projects", desc: "List known projects and instinct statistics" }
   ];
   return {
+    "tool.definition": async (input, output) => {
+      if (input.toolID === "edit" || input.toolID === "write") {
+        output.description = `[OPENECC ENFORCEMENT] This tool MUST be called inside a subagent, not in main context. Delegate via \`task\` tool to @builder or language-specific subagent. Rule: no direct work in main context. | ${output.description}`;
+      }
+      if (input.toolID === "glob" || input.toolID === "grep") {
+        output.description = `[OPENECC ENFORCEMENT] Source code search must be delegated to a subagent. In main context, delegate via \`task\` tool. Rule: main context is TALK + DELEGATE only. | ${output.description}`;
+      }
+      if (input.toolID === "bash") {
+        output.description = `[OPENECC ENFORCEMENT] All commands must run inside a subagent. In main context, delegate via \`task\` tool to @executor or language-specific subagent. Rule: no commands in main context. | ${output.description}`;
+      }
+    },
     config: async (config) => {
       config.skills = config.skills || {};
       config.skills.paths = config.skills.paths || [];
@@ -912,12 +957,16 @@ $ARGUMENTS`,
       const soulContent = readFileSafe(soulPath);
       const cleanSoul = soulContent.replace(/^---[\s\S]*?---\n/, "");
       const systemBootstrap = `<EXTREMELY_IMPORTANT>
-You have a soul — the principles below are always active. They are ALREADY LOADED.
+You have a soul \u2014 the principles below are always active. They are ALREADY LOADED.
 
 ${cleanSoul}
 </EXTREMELY_IMPORTANT>
 
 ${DELEGATOR_ROLE}
+
+${DELEGATION_ENFORCEMENT}
+
+${TOOL_ACCESS_BLOCK}
 
 ${QUICK_ROUTING}
 

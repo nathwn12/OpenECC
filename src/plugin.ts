@@ -13,6 +13,41 @@ const agentsDir = path.resolve(__dirname, "..", "prompts", "agents")
 const commandsDir = path.resolve(__dirname, "..", "commands")
 const agentsMDPath = path.resolve(__dirname, "..", "..", "AGENTS.md")
 
+const DELEGATION_ENFORCEMENT = `## OpenECC Delegation Enforcement (HARD RULES)
+
+These are structural constraints, NOT suggestions. Violations are bugs.
+
+### Tool Access Control — Main Context (TALK + DELEGATE only)
+NEVER call these tools in main context. They must go through subagents:
+
+| Tool | Correct Usage | Delegate To |
+|------|--------------|-------------|
+| \`edit\` | Changes source files | @builder or language-specific subagent |
+| \`write\` | Creates/modifies files | @builder or language-specific subagent |
+| \`bash\` | Runs commands | @executor or language-specific subagent |
+| \`glob\` | Searches codebase | @explorer or task-specific subagent |
+| \`grep\` | Searches file contents | @explorer or task-specific subagent |
+
+### Self-Audit Before Every Tool Call
+Before calling ANY tool, ask:
+1. "Does this tool edit, write, or run commands?" → DELEGATE via \`task\` tool.
+2. "Does this tool search source code?" → DELEGATE via \`task\` tool.
+3. "Could a subagent do this in parallel while I handle something else?" → DELEGATE via \`task\` tool.
+4. "Am I about to do work directly instead of delegating?" → STOP. Spawn a subagent.
+
+If any answer is YES, use the \`task\` tool to spawn a subagent. No exceptions.`
+
+const TOOL_ACCESS_BLOCK = `<structured type="tool_access">
+type: tool_access
+rule: Main context is TALK + DELEGATE only. Tools are partitioned by context.
+main_context_only:
+  allowed: [task, skill, todowrite, question, read, webfetch]
+  description: "Spawn subagents, load skills, track todos, gather context. NO source mutations."
+subagent_only:
+  allowed: [edit, write, bash, glob, grep]
+  description: "All source code work. NEVER called in main context."
+</structured>`
+
 const DELEGATOR_ROLE = `## Your Role (OpenECC Delegator)
 
 Your primary job is to delegate, synthesize, and verify — not to do work directly.
@@ -503,6 +538,18 @@ export const OpenECCPlugin: Plugin = async ({ client, directory, $, worktree }) 
   ]
 
   return {
+    "tool.definition": async (input, output) => {
+      if (input.toolID === "edit" || input.toolID === "write") {
+        output.description = `[OPENECC ENFORCEMENT] This tool MUST be called inside a subagent, not in main context. Delegate via \`task\` tool to @builder or language-specific subagent. Rule: no direct work in main context. | ${output.description}`
+      }
+      if (input.toolID === "glob" || input.toolID === "grep") {
+        output.description = `[OPENECC ENFORCEMENT] Source code search must be delegated to a subagent. In main context, delegate via \`task\` tool. Rule: main context is TALK + DELEGATE only. | ${output.description}`
+      }
+      if (input.toolID === "bash") {
+        output.description = `[OPENECC ENFORCEMENT] All commands must run inside a subagent. In main context, delegate via \`task\` tool to @executor or language-specific subagent. Rule: no commands in main context. | ${output.description}`
+      }
+    },
+
     config: async (config: any) => {
       config.skills = config.skills || {}
       config.skills.paths = config.skills.paths || []
@@ -567,6 +614,10 @@ ${cleanSoul}
 </EXTREMELY_IMPORTANT>
 
 ${DELEGATOR_ROLE}
+
+${DELEGATION_ENFORCEMENT}
+
+${TOOL_ACCESS_BLOCK}
 
 ${QUICK_ROUTING}
 
