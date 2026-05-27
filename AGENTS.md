@@ -146,7 +146,7 @@ Types: feat, fix, refactor, docs, test, chore, perf, ci
 ### Feature Implementation Workflow
 1. **Plan** — Use planner agent or `/plan` command
 2. **TDD** — Use tdd-guide agent or `/tdd` command
-3. **Code Review** — Use code-reviewer agent or `/review` command
+3. **Code Review** — Use code-reviewer agent or `/code-review` command
 4. **Security Review** — Use security-reviewer agent or `/security`
 5. **Quality Gate** — Run `/quality-gate` before committing
 
@@ -157,7 +157,7 @@ Types: feat, fix, refactor, docs, test, chore, perf, ci
 | Agent | Purpose | Command |
 |-------|---------|---------|
 | planner | Implementation planning | `/plan` |
-| code-reviewer | Code quality and security review | `/review` |
+| code-reviewer | Code quality and security review | `/code-review` |
 | security-reviewer | Security vulnerability analysis | `/security` |
 | tdd-guide | Test-driven development | `/tdd` |
 
