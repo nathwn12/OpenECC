@@ -16,24 +16,11 @@ Add OpenECC to the `plugin` array in your `opencode.json`:
 
 Restart OpenCode. The plugin installs through OpenCode's plugin manager.
 
-### Agent & Command Setup
+### What The Plugin Sets Up
 
-OpenECC auto-registers subagents and slash commands into your config. If you already have agents/commands with the same names, OpenECC won't override them.
+OpenECC auto-registers its bundled instructions, subagents, slash commands, and skills. You only need the `plugin` entry in your `opencode.json`.
 
-To use the agents and commands, your `opencode.json` must include:
-
-```json
-{
-  "plugin": [
-    "openecc@git+https://github.com/nathwn12/OpenECC.git"
-  ],
-  "instructions": [
-    "AGENTS.md"
-  ]
-}
-```
-
-The plugin injects everything else automatically.
+If you already have agents or commands with the same names, OpenECC won't override them.
 
 ## Soul
 
@@ -119,7 +106,6 @@ Invoke with `@planner`, `@code-reviewer`, etc.
 | `/rust-build` | Fix Rust build errors | rust-build-resolver |
 | `/security-scan` | Dependency, secret, anti-pattern scan | — |
 | `/harness-audit` | Audit harness configuration | — |
-| `/model-route` | Configure model routing | — |
 | `/loop-start` | Start autonomous agent loop | — |
 | `/loop-status` | Check loop status | — |
 | `/skill-create` | Generate skill from git history | — |

@@ -12670,30 +12670,30 @@ var OpenECCPlugin = async ({ client, directory, $, worktree }) => {
   const worktreePath = worktree || directory;
   const bootstrap = getBootstrapContent();
   const agents = [
-    { name: "planner", desc: "Expert planning specialist. Use for implementation plans, architectural changes, or complex refactoring.", model: "claude-opus-4-5", tools: { read: true, bash: true, write: false, edit: false } },
-    { name: "architect", desc: "Software architecture specialist for system design, scalability, and technical decision-making.", model: "claude-opus-4-5", tools: { read: true, bash: true, write: false, edit: false } },
-    { name: "code-reviewer", desc: "Expert code review specialist. Reviews code for quality, security, and maintainability.", model: "claude-opus-4-5", tools: { read: true, bash: true, write: false, edit: false } },
-    { name: "security-reviewer", desc: "Security vulnerability detection specialist. Reviews auth, input validation, secrets, API endpoints.", model: "claude-opus-4-5", tools: { read: true, bash: true, write: true, edit: true } },
-    { name: "tdd-guide", desc: "Test-Driven Development specialist enforcing write-tests-first. Ensures 80%+ test coverage.", model: "claude-opus-4-5", tools: { read: true, write: true, edit: true, bash: true } },
-    { name: "build-error-resolver", desc: "Build and TypeScript error resolution specialist. Fixes errors with minimal diffs.", model: "claude-opus-4-5", tools: { read: true, write: true, edit: true, bash: true } },
-    { name: "e2e-runner", desc: "End-to-end testing specialist using Playwright. Generates, maintains, and runs E2E tests.", model: "claude-opus-4-5", tools: { read: true, write: true, edit: true, bash: true } },
-    { name: "doc-updater", desc: "Documentation and codemap specialist. Keeps docs in sync with code.", model: "claude-opus-4-5", tools: { read: true, write: true, edit: true, bash: true } },
-    { name: "refactor-cleaner", desc: "Dead code cleanup and consolidation specialist. Removes unused code, duplicates.", model: "claude-opus-4-5", tools: { read: true, write: true, edit: true, bash: true } },
-    { name: "docs-lookup", desc: "Documentation specialist using MCP to fetch current library and API documentation.", model: "claude-sonnet-4-5", tools: { read: true, bash: true, write: false, edit: false } },
-    { name: "harness-optimizer", desc: "Analyzes and improves agent harness configuration for reliability, cost, throughput.", model: "claude-sonnet-4-5", tools: { read: true, bash: true, edit: true } },
-    { name: "loop-operator", desc: "Operates autonomous agent loops, monitors progress, intervenes safely.", model: "claude-sonnet-4-5", tools: { read: true, bash: true, edit: true } },
-    { name: "go-reviewer", desc: "Go code reviewer specializing in idiomatic Go, concurrency patterns, error handling.", model: "claude-opus-4-5", tools: { read: true, bash: true, write: false, edit: false } },
-    { name: "go-build-resolver", desc: "Go build and vet error resolution specialist. Fixes with minimal changes.", model: "claude-opus-4-5", tools: { read: true, write: true, edit: true, bash: true } },
-    { name: "python-reviewer", desc: "Python code reviewer specializing in PEP 8, type hints, security, and performance.", model: "claude-opus-4-5", tools: { read: true, bash: true, write: false, edit: false } },
-    { name: "rust-reviewer", desc: "Rust code reviewer specializing in ownership, lifetimes, concurrency, and safety.", model: "claude-opus-4-5", tools: { read: true, bash: true, write: false, edit: false } },
-    { name: "rust-build-resolver", desc: "Rust build and Cargo error resolution specialist. Fixes with minimal changes.", model: "claude-opus-4-5", tools: { read: true, write: true, edit: true, bash: true } },
-    { name: "cpp-reviewer", desc: "C++ code reviewer specializing in memory safety, modern C++, and performance.", model: "claude-opus-4-5", tools: { read: true, bash: true, write: false, edit: false } },
-    { name: "cpp-build-resolver", desc: "C++ build and CMake error resolution specialist. Fixes linker, template errors.", model: "claude-opus-4-5", tools: { read: true, write: true, edit: true, bash: true } },
-    { name: "java-reviewer", desc: "Java and Spring Boot reviewer specializing in layered architecture, JPA, security.", model: "claude-opus-4-5", tools: { read: true, bash: true, write: false, edit: false } },
-    { name: "java-build-resolver", desc: "Java/Maven/Gradle build error resolution specialist. Fixes with minimal changes.", model: "claude-opus-4-5", tools: { read: true, write: true, edit: true, bash: true } },
-    { name: "kotlin-reviewer", desc: "Kotlin and Android reviewer specializing in coroutines, Compose, idiomatic patterns.", model: "claude-opus-4-5", tools: { read: true, bash: true, write: false, edit: false } },
-    { name: "kotlin-build-resolver", desc: "Kotlin/Gradle build error resolution specialist. Fixes with minimal changes.", model: "claude-opus-4-5", tools: { read: true, write: true, edit: true, bash: true } },
-    { name: "database-reviewer", desc: "PostgreSQL database specialist for query optimization, schema design, security.", model: "claude-opus-4-5", tools: { read: true, write: true, edit: true, bash: true } }
+    { name: "planner", desc: "Expert planning specialist for complex features and refactoring. Use for implementation planning, architectural changes, or complex refactoring. Trigger: when a task needs structured planning before coding.", permission: { edit: "deny", write: "deny", task: "deny" } },
+    { name: "architect", desc: "Software architecture specialist for system design, scalability, and technical decision-making. Use when evaluating architecture, designing systems, or making technical decisions. Trigger: when architecture review or design decisions are needed.", permission: { edit: "deny", write: "deny", task: "deny" } },
+    { name: "code-reviewer", desc: "Expert code review specialist. Reviews code for quality, security, and maintainability. Use immediately after writing or modifying code. Trigger: when a file has been edited or written.", permission: { edit: "deny", write: "deny", task: "deny" } },
+    { name: "security-reviewer", desc: "Security vulnerability detection and remediation specialist. Use after writing code that handles user input, authentication, API endpoints, or sensitive data. Trigger: when auth, input validation, secrets, or API security is involved.", permission: { task: "deny" } },
+    { name: "tdd-guide", desc: "Test-Driven Development specialist enforcing write-tests-first methodology. Use when writing new features, fixing bugs, or refactoring code. Ensures 80%+ test coverage. Trigger: when a feature or bug fix needs tests." },
+    { name: "build-error-resolver", desc: "Build and TypeScript error resolution specialist. Use when build fails or type errors occur. Fixes build/type errors only with minimal diffs. Trigger: when tsc, bundler, or runtime errors are present.", permission: { task: "deny" } },
+    { name: "e2e-runner", desc: "End-to-end testing specialist using Playwright. Generates, maintains, and runs E2E tests for critical user flows. Use when E2E test coverage is needed. Trigger: when Playwright tests need creation, fixing, or maintenance." },
+    { name: "doc-updater", desc: "Documentation and codemap specialist. Keeps docs in sync with code. Use after code changes to update README, API docs, and architecture docs. Trigger: when code changes affect public APIs, README, or architecture docs." },
+    { name: "refactor-cleaner", desc: "Dead code cleanup and consolidation specialist. Removes unused code and consolidates duplicates without changing behavior. Use when the codebase has dead code or duplication. Trigger: when unused exports, dead parameters, or duplicates are found." },
+    { name: "docs-lookup", desc: "Documentation specialist using web fetch and MCP to research current library/API documentation. Use when you need up-to-date docs for a library, API, or framework. Trigger: when library documentation or API reference lookups are needed.", permission: { edit: "deny", write: "deny", task: "deny" } },
+    { name: "harness-optimizer", desc: "Analyzes and improves agent harness configuration for reliability, cost, and throughput. Use to audit and optimize harness setups. Trigger: when harness configuration needs review or optimization.", permission: { task: "deny" } },
+    { name: "loop-operator", desc: "Operates autonomous agent loops, monitors progress, and intervenes safely when stuck. Use for long-running multi-iteration tasks. Trigger: when an autonomous multi-step loop needs operation and monitoring.", permission: { task: "deny" } },
+    { name: "go-reviewer", desc: "Go code reviewer specializing in idiomatic Go, concurrency patterns, and error handling. Use after writing Go code. Trigger: when Go code has been written or modified.", permission: { edit: "deny", write: "deny", task: "deny" } },
+    { name: "go-build-resolver", desc: "Go build and vet error resolution specialist. Use when `go build` or `go vet` fails. Fixes with minimal changes. Trigger: when Go compilation or vet errors occur.", permission: { task: "deny" } },
+    { name: "python-reviewer", desc: "Python code reviewer specializing in PEP 8, type hints, security, and performance. Use after writing Python code. Trigger: when Python code has been written or modified.", permission: { edit: "deny", write: "deny", task: "deny" } },
+    { name: "rust-reviewer", desc: "Rust code reviewer specializing in ownership, lifetimes, concurrency, and safety. Use after writing Rust code. Trigger: when Rust code has been written or modified.", permission: { edit: "deny", write: "deny", task: "deny" } },
+    { name: "rust-build-resolver", desc: "Rust build and Cargo error resolution specialist. Use when `cargo check`, `build`, or `test` fails. Fixes with minimal changes. Trigger: when Rust compilation or test errors occur.", permission: { task: "deny" } },
+    { name: "cpp-reviewer", desc: "C++ code reviewer specializing in memory safety, modern C++, and performance. Use after writing C++ code. Trigger: when C++ code has been written or modified.", permission: { edit: "deny", write: "deny", task: "deny" } },
+    { name: "cpp-build-resolver", desc: "C++ build and CMake error resolution specialist. Use when C++ or CMake builds fail. Fixes linker, template, and configuration errors with minimal changes. Trigger: when C++ compilation, linking, or CMake errors occur.", permission: { task: "deny" } },
+    { name: "java-reviewer", desc: "Java and Spring Boot reviewer specializing in layered architecture, JPA, and security. Use after writing Java/Spring code. Trigger: when Java or Spring Boot code has been written or modified.", permission: { edit: "deny", write: "deny", task: "deny" } },
+    { name: "java-build-resolver", desc: "Java/Maven/Gradle build error resolution specialist. Use when Java build or tests fail. Fixes with minimal changes. Trigger: when Java compilation, Maven, or Gradle errors occur.", permission: { task: "deny" } },
+    { name: "kotlin-reviewer", desc: "Kotlin and Android reviewer specializing in coroutines, Jetpack Compose, and idiomatic patterns. Use after writing Kotlin/Android code. Trigger: when Kotlin or Android code has been written or modified.", permission: { edit: "deny", write: "deny", task: "deny" } },
+    { name: "kotlin-build-resolver", desc: "Kotlin/Gradle build error resolution specialist. Use when Kotlin or Gradle builds fail. Fixes with minimal changes. Trigger: when Kotlin compilation or Gradle configuration errors occur.", permission: { task: "deny" } },
+    { name: "database-reviewer", desc: "PostgreSQL and Supabase database specialist for query optimization, schema design, and security. Use after writing database queries, migrations, or RLS policies. Trigger: when SQL queries, schema changes, or RLS policies need review.", permission: { task: "deny" } }
   ];
   const commands = [
     { name: "plan", desc: "Create a detailed implementation plan for complex features or refactoring", agent: "planner", subtask: true },
@@ -12721,7 +12721,6 @@ var OpenECCPlugin = async ({ client, directory, $, worktree }) => {
     { name: "rust-build", desc: "Fix Rust build and Cargo errors", agent: "rust-build-resolver", subtask: true },
     { name: "security-scan", desc: "Run dependency, secret, and anti-pattern scan" },
     { name: "harness-audit", desc: "Audit harness configuration quality and coverage" },
-    { name: "model-route", desc: "Configure model routing for agents" },
     { name: "loop-start", desc: "Start autonomous agent loop with safety defaults" },
     { name: "loop-status", desc: "Check autonomous loop status and progress" },
     { name: "skill-create", desc: "Generate skill files from git history patterns" },
@@ -12749,13 +12748,15 @@ var OpenECCPlugin = async ({ client, directory, $, worktree }) => {
         if (!config2.agent[agent.name]) {
           const prompt = readFileSafe(path.join(agentsDir, `${agent.name}.txt`));
           if (prompt) {
-            config2.agent[agent.name] = {
+            const agentConfig = {
               description: agent.desc,
               mode: "subagent",
-              model: agent.model,
-              tools: agent.tools,
               prompt
             };
+            if (agent.permission) {
+              agentConfig.permission = agent.permission;
+            }
+            config2.agent[agent.name] = agentConfig;
           }
         }
       }
