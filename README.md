@@ -82,15 +82,15 @@ Invoke with `@planner`, `@code-reviewer`, etc.
 | Command | Description | Agent |
 |---------|-------------|-------|
 | `/plan` | Create detailed implementation plan | planner |
-| `/code-review` | Review code quality and security | code-reviewer |
+| `/code-reviewer` | Review code quality and security | code-reviewer |
 | `/security` | Run comprehensive security review | security-reviewer |
 | `/tdd` | Enforce TDD workflow | tdd-guide |
 | `/quality-gate` | Run full quality pipeline | — |
-| `/build-fix` | Fix build and TypeScript errors | build-error-resolver |
+| `/build-error-resolver` | Fix build and TypeScript errors | build-error-resolver |
 | `/e2e` | Generate and run Playwright E2E tests | e2e-runner |
-| `/refactor-clean` | Remove dead code and consolidate | refactor-cleaner |
+| `/refactor-cleaner` | Remove dead code and consolidate | refactor-cleaner |
 | `/orchestrate` | Orchestrate multiple agents | planner |
-| `/update-docs` | Update documentation | doc-updater |
+| `/doc-updater` | Update documentation | doc-updater |
 | `/update-codemaps` | Update codemaps | doc-updater |
 | `/test-coverage` | Analyze test coverage | tdd-guide |
 | `/learn` | Extract patterns from session | — |
