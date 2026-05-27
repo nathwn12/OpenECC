@@ -12338,11 +12338,16 @@ tool.schema = exports_external;
 import * as path from "path";
 import { fileURLToPath } from "url";
 import * as fs from "fs";
+import { execSync } from "child_process";
 var __dirname2 = path.dirname(fileURLToPath(import.meta.url));
 var skillsDir = path.resolve(__dirname2, "..", "skills");
-var _soulCache = undefined;
+var promptsDir = path.resolve(__dirname2, "..", "prompts");
+var agentsDir = path.resolve(__dirname2, "..", "prompts", "agents");
+var commandsDir = path.resolve(__dirname2, "..", "commands");
+var agentsMDPath = path.resolve(__dirname2, "..", "..", "AGENTS.md");
+var _soulCache = null;
 function getSoulContent() {
-  if (_soulCache !== undefined)
+  if (_soulCache !== null)
     return _soulCache;
   const soulPath = path.join(skillsDir, "soul", "SKILL.md");
   if (!fs.existsSync(soulPath)) {
@@ -12358,12 +12363,61 @@ ${content}
 </EXTREMELY_IMPORTANT>`;
   return _soulCache;
 }
+function readFileSafe(filePath) {
+  try {
+    return fs.readFileSync(filePath, "utf8");
+  } catch {
+    return "";
+  }
+}
 function resolveProjectFile(worktreePath, relativePath) {
   try {
     return fs.statSync(path.join(worktreePath, relativePath)).isFile();
   } catch {
     return false;
   }
+}
+function stripYamlFrontmatter(content) {
+  return content.replace(/^---[\s\S]*?---\n/, "");
+}
+function detectPackageManager(cwd) {
+  const lockfiles = {
+    "bun.lockb": "bun",
+    "pnpm-lock.yaml": "pnpm",
+    "yarn.lock": "yarn",
+    "package-lock.json": "npm"
+  };
+  for (const [lock, name] of Object.entries(lockfiles)) {
+    if (fs.existsSync(path.join(cwd, lock)))
+      return name;
+  }
+  return "npm";
+}
+function detectFormatter(cwd) {
+  if (fs.existsSync(path.join(cwd, "biome.json")) || fs.existsSync(path.join(cwd, "biome.jsonc")))
+    return "biome";
+  if (fs.existsSync(path.join(cwd, ".prettierrc")) || fs.existsSync(path.join(cwd, ".prettierrc.json")) || fs.existsSync(path.join(cwd, "prettier.config.js")) || fs.existsSync(path.join(cwd, ".prettierrc.yaml")))
+    return "prettier";
+  if (fs.existsSync(path.join(cwd, "pyproject.toml")))
+    return "black";
+  if (fs.existsSync(path.join(cwd, "go.mod")))
+    return "gofmt";
+  if (fs.existsSync(path.join(cwd, "Cargo.toml")))
+    return "rustfmt";
+  return null;
+}
+function detectLinter(cwd) {
+  if (fs.existsSync(path.join(cwd, "biome.json")) || fs.existsSync(path.join(cwd, "biome.jsonc")))
+    return "biome";
+  try {
+    if (fs.readdirSync(cwd).some((f) => f.startsWith("eslint.config.")))
+      return "eslint";
+  } catch {}
+  if (fs.existsSync(path.join(cwd, "go.mod")))
+    return "golangci-lint";
+  if (fs.existsSync(path.join(cwd, "Cargo.toml")))
+    return "clippy";
+  return null;
 }
 var editedFiles = new Set;
 var pendingToolChanges = new Map;
@@ -12376,19 +12430,7 @@ var runTestsTool = tool({
   },
   async execute(args, context) {
     const cwd = context.worktree || context.directory;
-    const lockfiles = {
-      "bun.lockb": "bun",
-      "pnpm-lock.yaml": "pnpm",
-      "yarn.lock": "yarn",
-      "package-lock.json": "npm"
-    };
-    let pm = "npm";
-    for (const [lock, name] of Object.entries(lockfiles)) {
-      if (fs.existsSync(path.join(cwd, lock))) {
-        pm = name;
-        break;
-      }
-    }
+    const pm = detectPackageManager(cwd);
     const cmd = pm === "npm" ? `${pm} run test` : `${pm} test`;
     const flags = [];
     if (args.coverage)
@@ -12416,15 +12458,255 @@ var changedFilesTool = tool({
     });
   }
 });
+var gitSummaryTool = tool({
+  description: "Show git branch, status, recent commits, and staged/unstaged diffs for the current repository.",
+  args: {},
+  async execute(_args, context) {
+    const cwd = context.worktree || context.directory;
+    const result = {};
+    try {
+      result.branch = execSync("git rev-parse --abbrev-ref HEAD", { cwd, encoding: "utf8", timeout: 3000 }).trim();
+    } catch {
+      result.branch = "(not a git repo)";
+    }
+    try {
+      result.status = execSync("git status --short", { cwd, encoding: "utf8", timeout: 3000 }).trim();
+    } catch {
+      result.status = "";
+    }
+    try {
+      const log = execSync("git log --oneline -5", { cwd, encoding: "utf8", timeout: 3000 }).trim();
+      result.recentCommits = log;
+    } catch {
+      result.recentCommits = "";
+    }
+    try {
+      const staged = execSync("git diff --cached --name-only", { cwd, encoding: "utf8", timeout: 3000 }).trim();
+      result.stagedFiles = staged;
+    } catch {
+      result.stagedFiles = "";
+    }
+    try {
+      const unstaged = execSync("git diff --name-only", { cwd, encoding: "utf8", timeout: 3000 }).trim();
+      result.unstagedFiles = unstaged;
+    } catch {
+      result.unstagedFiles = "";
+    }
+    return JSON.stringify(result, null, 2);
+  }
+});
+var formatCodeTool = tool({
+  description: "Detect the code formatter (Biome, Prettier, Black, gofmt, rustfmt) and return the exact command to format the project.",
+  args: {
+    path: tool.schema.string().optional().describe("Specific file or directory to format"),
+    check: tool.schema.boolean().optional().describe("Check mode (don't write, just report issues)")
+  },
+  async execute(args, context) {
+    const cwd = context.worktree || context.directory;
+    const formatter = detectFormatter(cwd);
+    const target = args.path || ".";
+    const formatterCommands = {
+      biome: { command: `npx biome format --write ${target}`, checkFlag: `npx biome format ${target}` },
+      prettier: { command: `npx prettier --write ${target}`, checkFlag: `npx prettier --check ${target}` },
+      black: { command: `black ${target}`, checkFlag: `black --check ${target}` },
+      gofmt: { command: `gofmt -w ${target}`, checkFlag: `gofmt -d ${target}` },
+      rustfmt: { command: `rustfmt ${target}`, checkFlag: `rustfmt --check ${target}` }
+    };
+    if (!formatter) {
+      return JSON.stringify({
+        detected: false,
+        formatter: null,
+        command: null,
+        instructions: "No formatter config detected. Options: create biome.json, .prettierrc, or configure Black, gofmt, rustfmt."
+      });
+    }
+    const entry = formatterCommands[formatter];
+    return JSON.stringify({
+      detected: true,
+      formatter,
+      command: args.check ? entry.checkFlag : entry.command,
+      instructions: `Detected formatter: ${formatter}. Run: ${args.check ? entry.checkFlag : entry.command}`
+    });
+  }
+});
+var lintCheckTool = tool({
+  description: "Detect the linter (ESLint, Biome, Ruff, Pylint, golangci-lint, Clippy) and build the run command.",
+  args: {
+    path: tool.schema.string().optional().describe("Specific file or directory to lint"),
+    fix: tool.schema.boolean().optional().describe("Auto-fix issues when supported")
+  },
+  async execute(args, context) {
+    const cwd = context.worktree || context.directory;
+    const linter = detectLinter(cwd);
+    const target = args.path || ".";
+    const linterCommands = {
+      biome: { command: `npx biome lint ${target}`, fixFlag: `npx biome lint --fix ${target}` },
+      eslint: { command: `npx eslint ${target}`, fixFlag: `npx eslint --fix ${target}` },
+      golangci_lint: { command: `golangci-lint run ${target}`, fixFlag: `golangci-lint run --fix ${target}` },
+      clippy: { command: `cargo clippy -- ${target}`, fixFlag: `cargo clippy --fix -- ${target}` }
+    };
+    if (!linter) {
+      return JSON.stringify({
+        detected: false,
+        linter: null,
+        command: null,
+        instructions: "No linter config detected. Options: create biome.json, eslint.config.*, or configure golangci-lint, Clippy."
+      });
+    }
+    const entry = linterCommands[linter];
+    return JSON.stringify({
+      detected: true,
+      linter,
+      command: args.fix ? entry.fixFlag : entry.command,
+      instructions: `Detected linter: ${linter}. Run: ${args.fix ? entry.fixFlag : entry.command}`
+    });
+  }
+});
+var securityAuditTool = tool({
+  description: "Run a three-phase security audit: dependency audit (npm audit), secret scanning (regex for API keys/tokens), and code anti-pattern detection (eval, innerHTML, SQL injection).",
+  args: {},
+  async execute(_args, context) {
+    const cwd = context.worktree || context.directory;
+    const report = [];
+    const commands = [];
+    report.push("# Security Audit Report");
+    report.push("");
+    const hasPackageJson = fs.existsSync(path.join(cwd, "package.json"));
+    if (hasPackageJson) {
+      report.push("## Phase 1: Dependency Audit");
+      report.push("Run: `npm audit` to check for vulnerable dependencies");
+      commands.push("npm audit --audit-level=high");
+      report.push("");
+    }
+    report.push("## Phase 2: Secret Scanning");
+    report.push("Run the following to scan for hardcoded secrets:");
+    commands.push('grep -rn "api[_-]\\?key\\|sk-[A-Za-z0-9]\\|ghp_\\|gho_\\|ghu_\\|xox[abp]\\|AKIA[0-9A-Z]\\|-----BEGIN RSA PRIVATE KEY-----" --include="*.{ts,js,py,rs,go,java}" --exclude-dir=node_modules --exclude-dir=.git . 2>/dev/null | grep -v "node_modules" | head -30');
+    report.push("");
+    report.push("## Phase 3: Anti-Pattern Detection");
+    report.push("Run the following to detect dangerous patterns:");
+    commands.push('grep -rn "eval(\\|innerHTML\\|dangerouslySetInnerHTML\\|execSync\\|child_process\\|fromCharCode\\|document.write\\|new Function(" --include="*.{ts,tsx,js,jsx}" --exclude-dir=node_modules . 2>/dev/null | head -20');
+    commands.push('grep -rn "${.*\\(req\\.query\\|req\\.body\\|req\\.params\\)" --include="*.{ts,js}" --exclude-dir=node_modules . 2>/dev/null | head -10');
+    report.push("");
+    report.push("## Commands to Run");
+    commands.forEach((c) => report.push(`- \`${c}\``));
+    report.push("");
+    report.push("**IMPORTANT**: Review the output of each command. Fix CRITICAL issues before committing.");
+    return JSON.stringify({
+      commands,
+      instructions: report.join(`
+`)
+    });
+  }
+});
 var OpenECCPlugin = async ({ client, directory, $, worktree }) => {
   const worktreePath = worktree || directory;
   const soul = getSoulContent();
+  const agents = [
+    { name: "planner", desc: "Expert planning specialist. Use for implementation plans, architectural changes, or complex refactoring.", model: "claude-opus-4-5", tools: { read: true, bash: true, write: false, edit: false } },
+    { name: "architect", desc: "Software architecture specialist for system design, scalability, and technical decision-making.", model: "claude-opus-4-5", tools: { read: true, bash: true, write: false, edit: false } },
+    { name: "code-reviewer", desc: "Expert code review specialist. Reviews code for quality, security, and maintainability.", model: "claude-opus-4-5", tools: { read: true, bash: true, write: false, edit: false } },
+    { name: "security-reviewer", desc: "Security vulnerability detection specialist. Reviews auth, input validation, secrets, API endpoints.", model: "claude-opus-4-5", tools: { read: true, bash: true, write: true, edit: true } },
+    { name: "tdd-guide", desc: "Test-Driven Development specialist enforcing write-tests-first. Ensures 80%+ test coverage.", model: "claude-opus-4-5", tools: { read: true, write: true, edit: true, bash: true } },
+    { name: "build-error-resolver", desc: "Build and TypeScript error resolution specialist. Fixes errors with minimal diffs.", model: "claude-opus-4-5", tools: { read: true, write: true, edit: true, bash: true } },
+    { name: "e2e-runner", desc: "End-to-end testing specialist using Playwright. Generates, maintains, and runs E2E tests.", model: "claude-opus-4-5", tools: { read: true, write: true, edit: true, bash: true } },
+    { name: "doc-updater", desc: "Documentation and codemap specialist. Keeps docs in sync with code.", model: "claude-opus-4-5", tools: { read: true, write: true, edit: true, bash: true } },
+    { name: "refactor-cleaner", desc: "Dead code cleanup and consolidation specialist. Removes unused code, duplicates.", model: "claude-opus-4-5", tools: { read: true, write: true, edit: true, bash: true } },
+    { name: "docs-lookup", desc: "Documentation specialist using MCP to fetch current library and API documentation.", model: "claude-sonnet-4-5", tools: { read: true, bash: true, write: false, edit: false } },
+    { name: "harness-optimizer", desc: "Analyzes and improves agent harness configuration for reliability, cost, throughput.", model: "claude-sonnet-4-5", tools: { read: true, bash: true, edit: true } },
+    { name: "loop-operator", desc: "Operates autonomous agent loops, monitors progress, intervenes safely.", model: "claude-sonnet-4-5", tools: { read: true, bash: true, edit: true } },
+    { name: "go-reviewer", desc: "Go code reviewer specializing in idiomatic Go, concurrency patterns, error handling.", model: "claude-opus-4-5", tools: { read: true, bash: true, write: false, edit: false } },
+    { name: "go-build-resolver", desc: "Go build and vet error resolution specialist. Fixes with minimal changes.", model: "claude-opus-4-5", tools: { read: true, write: true, edit: true, bash: true } },
+    { name: "python-reviewer", desc: "Python code reviewer specializing in PEP 8, type hints, security, and performance.", model: "claude-opus-4-5", tools: { read: true, bash: true, write: false, edit: false } },
+    { name: "rust-reviewer", desc: "Rust code reviewer specializing in ownership, lifetimes, concurrency, and safety.", model: "claude-opus-4-5", tools: { read: true, bash: true, write: false, edit: false } },
+    { name: "rust-build-resolver", desc: "Rust build and Cargo error resolution specialist. Fixes with minimal changes.", model: "claude-opus-4-5", tools: { read: true, write: true, edit: true, bash: true } },
+    { name: "cpp-reviewer", desc: "C++ code reviewer specializing in memory safety, modern C++, and performance.", model: "claude-opus-4-5", tools: { read: true, bash: true, write: false, edit: false } },
+    { name: "cpp-build-resolver", desc: "C++ build and CMake error resolution specialist. Fixes linker, template errors.", model: "claude-opus-4-5", tools: { read: true, write: true, edit: true, bash: true } },
+    { name: "java-reviewer", desc: "Java and Spring Boot reviewer specializing in layered architecture, JPA, security.", model: "claude-opus-4-5", tools: { read: true, bash: true, write: false, edit: false } },
+    { name: "java-build-resolver", desc: "Java/Maven/Gradle build error resolution specialist. Fixes with minimal changes.", model: "claude-opus-4-5", tools: { read: true, write: true, edit: true, bash: true } },
+    { name: "kotlin-reviewer", desc: "Kotlin and Android reviewer specializing in coroutines, Compose, idiomatic patterns.", model: "claude-opus-4-5", tools: { read: true, bash: true, write: false, edit: false } },
+    { name: "kotlin-build-resolver", desc: "Kotlin/Gradle build error resolution specialist. Fixes with minimal changes.", model: "claude-opus-4-5", tools: { read: true, write: true, edit: true, bash: true } },
+    { name: "database-reviewer", desc: "PostgreSQL database specialist for query optimization, schema design, security.", model: "claude-opus-4-5", tools: { read: true, write: true, edit: true, bash: true } }
+  ];
+  const commands = [
+    { name: "plan", desc: "Create a detailed implementation plan for complex features or refactoring", agent: "planner", subtask: true },
+    { name: "code-review", desc: "Review code for quality, security, and maintainability", agent: "code-reviewer", subtask: true },
+    { name: "security", desc: "Run comprehensive security review using OWASP guidelines", agent: "security-reviewer", subtask: true },
+    { name: "tdd", desc: "Enforce TDD workflow with 80%+ test coverage", agent: "tdd-guide", subtask: true },
+    { name: "quality-gate", desc: "Run quality pipeline: format, lint, type-check, test, security scan", subtask: false },
+    { name: "build-fix", desc: "Fix build and TypeScript errors with minimal changes", agent: "build-error-resolver", subtask: true },
+    { name: "e2e", desc: "Generate and run E2E tests with Playwright", agent: "e2e-runner", subtask: true },
+    { name: "refactor-clean", desc: "Remove dead code and consolidate duplicates", agent: "refactor-cleaner", subtask: true },
+    { name: "orchestrate", desc: "Orchestrate multiple agents for complex tasks", agent: "planner", subtask: true },
+    { name: "update-docs", desc: "Update documentation to reflect current codebase", agent: "doc-updater", subtask: true },
+    { name: "update-codemaps", desc: "Update codemaps to reflect current architecture", agent: "doc-updater", subtask: true },
+    { name: "test-coverage", desc: "Analyze and improve test coverage", agent: "tdd-guide", subtask: true },
+    { name: "learn", desc: "Extract patterns and learnings from current session" },
+    { name: "checkpoint", desc: "Save verification state and progress checkpoint" },
+    { name: "verify", desc: "Run verification loop: build, lint, test, security" },
+    { name: "eval", desc: "Run evaluation against acceptance criteria" },
+    { name: "setup-pm", desc: "Configure package manager for the project" },
+    { name: "go-review", desc: "Review Go code for idiomatic patterns and correctness", agent: "go-reviewer", subtask: true },
+    { name: "go-test", desc: "Run Go TDD workflow", agent: "tdd-guide", subtask: true },
+    { name: "go-build", desc: "Fix Go build and vet errors", agent: "go-build-resolver", subtask: true },
+    { name: "rust-review", desc: "Review Rust code for safety and correctness", agent: "rust-reviewer", subtask: true },
+    { name: "rust-test", desc: "Run Rust TDD workflow", agent: "tdd-guide", subtask: true },
+    { name: "rust-build", desc: "Fix Rust build and Cargo errors", agent: "rust-build-resolver", subtask: true },
+    { name: "security-scan", desc: "Run dependency, secret, and anti-pattern scan" },
+    { name: "harness-audit", desc: "Audit harness configuration quality and coverage" },
+    { name: "model-route", desc: "Configure model routing for agents" },
+    { name: "loop-start", desc: "Start autonomous agent loop with safety defaults" },
+    { name: "loop-status", desc: "Check autonomous loop status and progress" },
+    { name: "skill-create", desc: "Generate skill files from git history patterns" },
+    { name: "instinct-status", desc: "View learned instinct patterns" },
+    { name: "instinct-import", desc: "Import instincts from a file" },
+    { name: "instinct-export", desc: "Export instincts to a file" },
+    { name: "evolve", desc: "Cluster instincts into reusable skills" },
+    { name: "promote", desc: "Promote project instincts to global scope" },
+    { name: "projects", desc: "List known projects and instinct statistics" }
+  ];
   return {
     config: async (config2) => {
       config2.skills = config2.skills || {};
       config2.skills.paths = config2.skills.paths || [];
       if (!config2.skills.paths.includes(skillsDir)) {
         config2.skills.paths.push(skillsDir);
+      }
+      config2.instructions = config2.instructions || [];
+      const agentsMDAbs = agentsMDPath;
+      if (!config2.instructions.some((i) => i === agentsMDAbs)) {
+        config2.instructions.push(agentsMDAbs);
+      }
+      config2.agent = config2.agent || {};
+      for (const agent of agents) {
+        if (!config2.agent[agent.name]) {
+          const prompt = readFileSafe(path.join(agentsDir, `${agent.name}.txt`));
+          if (prompt) {
+            config2.agent[agent.name] = {
+              description: agent.desc,
+              mode: "subagent",
+              model: agent.model,
+              tools: agent.tools,
+              prompt
+            };
+          }
+        }
+      }
+      config2.command = config2.command || {};
+      for (const cmd of commands) {
+        if (!config2.command[cmd.name]) {
+          const templateContent = readFileSafe(path.join(commandsDir, `${cmd.name}.md`));
+          const cleanTemplate = stripYamlFrontmatter(templateContent);
+          if (cleanTemplate) {
+            config2.command[cmd.name] = {
+              description: cmd.desc,
+              template: `${cleanTemplate}
+
+$ARGUMENTS`,
+              ...cmd.agent ? { agent: cmd.agent } : {},
+              ...cmd.subtask ? { subtask: true } : {}
+            };
+          }
+        }
       }
     },
     "experimental.chat.messages.transform": async (_input, output) => {
@@ -12482,10 +12764,7 @@ var OpenECCPlugin = async ({ client, directory, $, worktree }) => {
     },
     "tool.execute.after": async (input, _output) => {
       const filePath = input.args?.filePath;
-      if (input.tool === "edit" && filePath) {
-        editedFiles.add(filePath);
-      }
-      if (input.tool === "write" && filePath) {
+      if ((input.tool === "edit" || input.tool === "write") && filePath) {
         editedFiles.add(filePath);
       }
       if (input.tool === "edit" && filePath?.match(/\.tsx?$/)) {
@@ -12540,18 +12819,9 @@ var OpenECCPlugin = async ({ client, directory, $, worktree }) => {
         ECC_PLUGIN: "true",
         PROJECT_ROOT: worktreePath
       };
-      const lockfiles = {
-        "bun.lockb": "bun",
-        "pnpm-lock.yaml": "pnpm",
-        "yarn.lock": "yarn",
-        "package-lock.json": "npm"
-      };
-      for (const [lock, name] of Object.entries(lockfiles)) {
-        if (resolveProjectFile(worktreePath, lock)) {
-          env.PACKAGE_MANAGER = name;
-          break;
-        }
-      }
+      const pm = detectPackageManager(worktreePath);
+      if (pm)
+        env.PACKAGE_MANAGER = pm;
       const langDetectors = {
         "tsconfig.json": "typescript",
         "go.mod": "go",
@@ -12571,7 +12841,11 @@ var OpenECCPlugin = async ({ client, directory, $, worktree }) => {
     },
     tool: {
       "run-tests": runTestsTool,
-      "changed-files": changedFilesTool
+      "changed-files": changedFilesTool,
+      "git-summary": gitSummaryTool,
+      "format-code": formatCodeTool,
+      "lint-check": lintCheckTool,
+      "security-audit": securityAuditTool
     }
   };
 };
