@@ -77,6 +77,36 @@ skill: learn about tdd-workflow
 
 Invoke with `@planner`, `@code-reviewer`, etc.
 
+<details>
+<summary>Agent descriptions (click to expand)</summary>
+
+- **planner** — Expert planning specialist for complex features and refactoring. Use for implementation planning, architectural changes, or complex refactoring. *(read-only, read + bash)*
+- **architect** — Software architecture specialist for system design, scalability, and technical decision-making. *(read-only, read + bash)*
+- **code-reviewer** — Expert code review specialist. Reviews code for quality, security, and maintainability. *(read-only, read + bash)*
+- **security-reviewer** — Security vulnerability detection and remediation specialist. Use after writing code that handles user input, authentication, API endpoints, or sensitive data. *(read, write, edit, bash)*
+- **tdd-guide** — Test-Driven Development specialist enforcing write-tests-first methodology. Ensures 80%+ test coverage. *(read, write, edit, bash)*
+- **build-error-resolver** — Build and TypeScript error resolution specialist. Fixes build/type errors with minimal diffs. *(read, write, edit, bash)*
+- **e2e-runner** — End-to-end testing specialist using Playwright. Generates, maintains, and runs E2E tests for critical user flows. *(read, write, edit, bash)*
+- **doc-updater** — Documentation and codemap specialist. Keeps docs in sync with code. *(read, write, edit, bash)*
+- **refactor-cleaner** — Dead code cleanup and consolidation specialist. Removes unused code and consolidates duplicates. *(read, write, edit, bash)*
+- **docs-lookup** — Documentation specialist using web fetch and MCP to research library/API documentation. *(read-only, read + bash)*
+- **harness-optimizer** — Analyzes and improves agent harness configuration for reliability, cost, and throughput. *(read, bash, edit)*
+- **loop-operator** — Operates autonomous agent loops, monitors progress, and intervenes safely when stuck. *(read, bash, edit)*
+- **go-reviewer** — Go code reviewer specializing in idiomatic Go, concurrency patterns, and error handling. *(read-only, read + bash)*
+- **go-build-resolver** — Go build and vet error resolution specialist. Fixes with minimal changes. *(read, write, edit, bash)*
+- **python-reviewer** — Python code reviewer specializing in PEP 8, type hints, security, and performance. *(read-only, read + bash)*
+- **rust-reviewer** — Rust code reviewer specializing in ownership, lifetimes, concurrency, and safety. *(read-only, read + bash)*
+- **rust-build-resolver** — Rust build and Cargo error resolution specialist. *(read, write, edit, bash)*
+- **cpp-reviewer** — C++ code reviewer specializing in memory safety, modern C++, and performance. *(read-only, read + bash)*
+- **cpp-build-resolver** — C++ build and CMake error resolution specialist. Fixes linker, template, and configuration errors. *(read, write, edit, bash)*
+- **java-reviewer** — Java and Spring Boot reviewer specializing in layered architecture, JPA, and security. *(read-only, read + bash)*
+- **java-build-resolver** — Java/Maven/Gradle build error resolution specialist. *(read, write, edit, bash)*
+- **kotlin-reviewer** — Kotlin and Android reviewer specializing in coroutines, Jetpack Compose, and idiomatic patterns. *(read-only, read + bash)*
+- **kotlin-build-resolver** — Kotlin/Gradle build error resolution specialist. *(read, write, edit, bash)*
+- **database-reviewer** — PostgreSQL and Supabase database specialist for query optimization, schema design, and security. *(read, write, edit, bash)*
+
+</details>
+
 ## Commands (34)
 
 | Command | Description | Agent |
@@ -115,6 +145,51 @@ Invoke with `@planner`, `@code-reviewer`, etc.
 | `/evolve` | Cluster instincts into skills | — |
 | `/promote` | Promote instincts to global scope | — |
 | `/projects` | List projects with instinct stats | — |
+
+<details>
+<summary>Command descriptions (click to expand)</summary>
+
+**Delegation commands** (route to an agent):
+
+- **/plan** → @planner — Create a detailed implementation plan for complex features or refactoring
+- **/code-review** → @code-reviewer — Review code for quality, security, and maintainability
+- **/security** → @security-reviewer — Run comprehensive security review using OWASP guidelines
+- **/tdd** → @tdd-guide — Enforce TDD workflow with 80%+ test coverage
+- **/build-fix** → @build-error-resolver — Fix build and TypeScript errors with minimal changes
+- **/e2e** → @e2e-runner — Generate and run E2E tests with Playwright
+- **/refactor-clean** → @refactor-cleaner — Remove dead code and consolidate duplicates
+- **/orchestrate** → @planner — Orchestrate multiple agents for complex tasks
+- **/update-docs** → @doc-updater — Update documentation to reflect current codebase
+- **/update-codemaps** → @doc-updater — Update codemaps to reflect current architecture
+- **/test-coverage** → @tdd-guide — Analyze and improve test coverage
+- **/go-review** → @go-reviewer — Review Go code for idiomatic patterns and correctness
+- **/go-test** → @tdd-guide — Run Go TDD workflow
+- **/go-build** → @go-build-resolver — Fix Go build and vet errors
+- **/rust-review** → @rust-reviewer — Review Rust code for safety and correctness
+- **/rust-test** → @tdd-guide — Run Rust TDD workflow
+- **/rust-build** → @rust-build-resolver — Fix Rust build and Cargo errors
+
+**Utility commands** (standalone, no agent delegation):
+
+- **/quality-gate** — Run quality pipeline: format, lint, type-check, test, security scan
+- **/learn** — Extract patterns and learnings from current session
+- **/checkpoint** — Save verification state and progress checkpoint
+- **/verify** — Run verification loop: build, lint, test, security
+- **/eval** — Run evaluation against acceptance criteria
+- **/setup-pm** — Configure package manager for the project
+- **/security-scan** — Run dependency, secret, and anti-pattern scan
+- **/harness-audit** — Audit harness configuration quality and coverage
+- **/loop-start** — Start autonomous agent loop with safety defaults
+- **/loop-status** — Check autonomous loop status and progress
+- **/skill-create** — Generate skill files from git history patterns
+- **/instinct-status** — View learned instinct patterns
+- **/instinct-import** — Import instincts from a file
+- **/instinct-export** — Export instincts to a file
+- **/evolve** — Cluster instincts into reusable skills
+- **/promote** — Promote project instincts to global scope
+- **/projects** — List known projects and instinct statistics
+
+</details>
 
 ## Custom Tools
 
