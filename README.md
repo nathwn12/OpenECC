@@ -48,36 +48,36 @@ skill: learn about tdd-workflow
 
 ## Agents (24)
 
-| Agent | Model | Tools |
-|-------|-------|-------|
-| `planner` | Opus | read, bash |
-| `architect` | Opus | read, bash |
-| `code-reviewer` | Opus | read, bash |
-| `security-reviewer` | Opus | read, bash, write, edit |
-| `tdd-guide` | Opus | read, write, edit, bash |
-| `build-error-resolver` | Opus | read, write, edit, bash |
-| `e2e-runner` | Opus | read, write, edit, bash |
-| `doc-updater` | Opus | read, write, edit, bash |
-| `refactor-cleaner` | Opus | read, write, edit, bash |
-| `docs-lookup` | Sonnet | read, bash |
-| `harness-optimizer` | Sonnet | read, bash, edit |
-| `loop-operator` | Sonnet | read, bash, edit |
-| `go-reviewer` | Opus | read, bash |
-| `go-build-resolver` | Opus | read, write, edit, bash |
-| `python-reviewer` | Opus | read, bash |
-| `rust-reviewer` | Opus | read, bash |
-| `rust-build-resolver` | Opus | read, write, edit, bash |
-| `cpp-reviewer` | Opus | read, bash |
-| `cpp-build-resolver` | Opus | read, write, edit, bash |
-| `java-reviewer` | Opus | read, bash |
-| `java-build-resolver` | Opus | read, write, edit, bash |
-| `kotlin-reviewer` | Opus | read, bash |
-| `kotlin-build-resolver` | Opus | read, write, edit, bash |
-| `database-reviewer` | Opus | read, write, edit, bash |
+| Agent | Tools |
+|-------|-------|
+| `planner` | read, bash |
+| `architect` | read, bash |
+| `code-reviewer` | read, bash |
+| `security-reviewer` | read, bash, write, edit |
+| `tdd-guide` | read, write, edit, bash |
+| `build-error-resolver` | read, write, edit, bash |
+| `e2e-runner` | read, write, edit, bash |
+| `doc-updater` | read, write, edit, bash |
+| `refactor-cleaner` | read, write, edit, bash |
+| `docs-lookup` | read, bash |
+| `harness-optimizer` | read, bash, edit |
+| `loop-operator` | read, bash, edit |
+| `go-reviewer` | read, bash |
+| `go-build-resolver` | read, write, edit, bash |
+| `python-reviewer` | read, bash |
+| `rust-reviewer` | read, bash |
+| `rust-build-resolver` | read, write, edit, bash |
+| `cpp-reviewer` | read, bash |
+| `cpp-build-resolver` | read, write, edit, bash |
+| `java-reviewer` | read, bash |
+| `java-build-resolver` | read, write, edit, bash |
+| `kotlin-reviewer` | read, bash |
+| `kotlin-build-resolver` | read, write, edit, bash |
+| `database-reviewer` | read, write, edit, bash |
 
 Invoke with `@planner`, `@code-reviewer`, etc.
 
-## Commands (35)
+## Commands (34)
 
 | Command | Description | Agent |
 |---------|-------------|-------|
@@ -147,8 +147,10 @@ Remove-Item -Recurse -Force "$env:USERPROFILE\.cache\opencode\packages\openecc@g
 
 ```bash
 bun install       # Install dev dependencies
-bun run bundle    # Build plugin bundle
+bun run bundle    # Build plugin bundle (uses --external @opencode-ai/plugin)
 ```
+
+The build excludes `@opencode-ai/plugin` from the bundle since OpenCode provides it at runtime — this reduced the bundle from 475KB to ~30KB (94% reduction).
 
 ## License
 
