@@ -1,0 +1,25 @@
+{
+  "name": "openecc",
+  "version": "1.0.0",
+  "description": "OpenECC — a soul and skills plugin for OpenCode",
+  "type": "module",
+  "main": ".opencode/plugins/openecc.js",
+  "repository": "github:nathwn12/OpenECC",
+  "keywords": [
+    "opencode",
+    "plugin",
+    "skills",
+    "soul",
+    "ai-coding",
+    "developer-tools"
+  ],
+  "license": "MIT",
+  "scripts": {
+    "bundle": "bun build src/plugin.ts --outfile .opencode/plugins/openecc.js --target bun",
+    "clean": "if exist .opencode\\plugins\\openecc.js del .opencode\\plugins\\openecc.js"
+  },
+  "devDependencies": {
+    "@opencode-ai/plugin": "^1.15.5",
+    "typescript": "^5.7"
+  }
+}
