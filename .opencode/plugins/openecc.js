@@ -12341,27 +12341,96 @@ import * as fs from "fs";
 import { execSync } from "child_process";
 var __dirname2 = path.dirname(fileURLToPath(import.meta.url));
 var skillsDir = path.resolve(__dirname2, "..", "skills");
-var promptsDir = path.resolve(__dirname2, "..", "prompts");
 var agentsDir = path.resolve(__dirname2, "..", "prompts", "agents");
 var commandsDir = path.resolve(__dirname2, "..", "commands");
 var agentsMDPath = path.resolve(__dirname2, "..", "..", "AGENTS.md");
-var _soulCache = null;
-function getSoulContent() {
-  if (_soulCache !== null)
-    return _soulCache;
+var DELEGATOR_ROLE = `## Your Role (OpenECC Delegator)
+
+Your primary job is to delegate, synthesize, and verify \u2014 not to do work directly.
+
+### When to delegate to a subagent (@mention):
+- Planning / architecture \u2192 @planner
+- Code review / quality \u2192 @code-reviewer
+- Security review \u2192 @security-reviewer
+- Build/type errors \u2192 @build-error-resolver
+- Test-first development \u2192 @tdd-guide
+- E2E tests \u2192 @e2e-runner
+- Documentation \u2192 @doc-updater / @docs-lookup
+- Dead code cleanup \u2192 @refactor-cleaner
+- Language-specific (Go/Rust/C++/Java/Kotlin/Python) \u2192 respective reviewer
+- Complex multi-step tasks \u2192 @planner (orchestrate mode)
+
+### When to load a skill:
+- API design \u2192 skill tool \u2192 api-design
+- Backend patterns \u2192 skill tool \u2192 backend-patterns
+- Frontend patterns \u2192 skill tool \u2192 frontend-patterns
+- Testing patterns \u2192 skill tool \u2192 tdd-workflow / e2e-testing
+- Security review \u2192 skill tool \u2192 security-review
+
+### When to answer directly:
+- Simple factual questions
+- Quick clarifications ("what is X?")
+- Status checks
+- Anything that requires zero tools
+
+### Completion protocol:
+1. **Verify before claiming** \u2014 run the command, read the output, then speak
+2. **Synthesize** \u2014 distill subagent results into 3-5 sentences max
+3. **Signature** \u2014 end with \`---\` and a brief status summary`;
+var QUICK_ROUTING = `### Quick Routing
+Task \\u2192 Subagent:
+  plan/architect   \\u2192 @planner
+  code review      \\u2192 @code-reviewer
+  security         \\u2192 @security-reviewer
+  build/type error \\u2192 @build-error-resolver
+  test-first/TDD   \\u2192 @tdd-guide
+  docs             \\u2192 @doc-updater / @docs-lookup
+  cleanup/refactor \\u2192 @refactor-cleaner
+  debug            \\u2192 @build-error-resolver
+  e2e              \\u2192 @e2e-runner
+  language-specific \\u2192 <lang>-reviewer / <lang>-build-resolver
+  complex multi    \\u2192 @planner (orchestrate)
+
+Skill \\u2192 Task:
+  api-design          \\u2192 API routes, resources, pagination
+  backend-patterns    \\u2192 Node.js, Express, Next.js API
+  frontend-patterns   \\u2192 React, Next.js, state, UI
+  tdd-workflow        \\u2192 red-green-refactor, 80% coverage
+  e2e-testing         \\u2192 Playwright, Page Object Model
+  security-review     \\u2192 auth, input validation, secrets
+  coding-standards    \\u2192 naming, immutability, quality
+  verification-loop   \\u2192 build, types, lint, test, security
+  strategic-compact   \\u2192 context compaction strategy
+  api-security        \\u2192 authZ, rate limiting, OWASP`;
+var COMPLETION_CONTRACT = `### Before responding
+1. Did you delegate analysis/planning work to a subagent when appropriate?
+2. Did you verify results (not assume)?
+3. Is the response concise and synthesized?
+
+When done: place \`---\` followed by \`**Status:** \\u2705 Done | \\u1f6a7 Blocked | \\ud83d\\udd04 In Progress\``;
+var _bootstrapCache = null;
+function getBootstrapContent() {
+  if (_bootstrapCache !== null)
+    return _bootstrapCache;
   const soulPath = path.join(skillsDir, "soul", "SKILL.md");
   if (!fs.existsSync(soulPath)) {
-    _soulCache = null;
+    _bootstrapCache = null;
     return null;
   }
   const fullContent = fs.readFileSync(soulPath, "utf8");
-  const content = fullContent.replace(/^---[\s\S]*?---\n/, "");
-  _soulCache = `<EXTREMELY_IMPORTANT>
+  const soulContent = fullContent.replace(/^---[\s\S]*?---\n/, "");
+  _bootstrapCache = `<EXTREMELY_IMPORTANT>
 You have a soul \u2014 the principles below are always active. They are ALREADY LOADED.
 
-${content}
-</EXTREMELY_IMPORTANT>`;
-  return _soulCache;
+${soulContent}
+</EXTREMELY_IMPORTANT>
+
+${DELEGATOR_ROLE}
+
+${QUICK_ROUTING}
+
+${COMPLETION_CONTRACT}`;
+  return _bootstrapCache;
 }
 function readFileSafe(filePath) {
   try {
@@ -12420,7 +12489,6 @@ function detectLinter(cwd) {
   return null;
 }
 var editedFiles = new Set;
-var pendingToolChanges = new Map;
 var runTestsTool = tool({
   description: "Run the test suite with optional coverage, watch mode, or specific test patterns. Automatically detects package manager (npm, pnpm, yarn, bun) and test framework.",
   args: {
@@ -12600,7 +12668,7 @@ var securityAuditTool = tool({
 });
 var OpenECCPlugin = async ({ client, directory, $, worktree }) => {
   const worktreePath = worktree || directory;
-  const soul = getSoulContent();
+  const bootstrap = getBootstrapContent();
   const agents = [
     { name: "planner", desc: "Expert planning specialist. Use for implementation plans, architectural changes, or complex refactoring.", model: "claude-opus-4-5", tools: { read: true, bash: true, write: false, edit: false } },
     { name: "architect", desc: "Software architecture specialist for system design, scalability, and technical decision-making.", model: "claude-opus-4-5", tools: { read: true, bash: true, write: false, edit: false } },
@@ -12710,38 +12778,36 @@ $ARGUMENTS`,
       }
     },
     "experimental.chat.messages.transform": async (_input, output) => {
-      if (!soul || !output.messages?.length)
+      if (!bootstrap || !output.messages?.length)
         return;
       const firstUser = output.messages.find((m) => m.info?.role === "user");
       if (!firstUser || !firstUser.parts?.length)
         return;
       if (firstUser.parts.some((p) => p.type === "text" && p.text?.includes("EXTREMELY_IMPORTANT")))
         return;
-      const ref = firstUser.parts[0];
-      firstUser.parts.unshift({ ...ref, type: "text", text: soul });
+      firstUser.parts.unshift({
+        type: "text",
+        text: bootstrap,
+        id: firstUser.parts[0].id,
+        sessionID: firstUser.parts[0].sessionID,
+        messageID: firstUser.parts[0].messageID
+      });
     },
-    "experimental.session.compacting": async () => {
-      const contextBlocks = [
-        "# OpenECC Context (preserve across compaction)",
-        "",
-        "## Active Soul",
-        "- Think Before Coding: surface assumptions. Don't hide confusion.",
-        "- Simplicity First: minimum code. Nothing speculative.",
-        "- Surgical Changes: touch only what you must.",
-        "- Goal-Driven Execution: define verifiable success criteria.",
-        ""
-      ];
+    "experimental.session.compacting": async (_input, output) => {
+      output.context.push("# OpenECC Context (preserve across compaction)");
+      output.context.push("");
+      output.context.push("## OpenECC Delegator");
+      output.context.push("- Primary role: delegate to subagents, synthesize results, verify before claiming");
+      output.context.push("- Soul: Think Before Coding, Simplicity First, Surgical Changes, Goal-Driven Execution");
+      output.context.push("- Route by task type: planning, review, build-fix, TDD, docs, language-specific");
+      output.context.push("- Answer directly when no tools are needed");
+      output.context.push("");
       if (editedFiles.size > 0) {
-        contextBlocks.push("## Recently Edited Files");
+        output.context.push("## Recently Edited Files");
         for (const f of editedFiles)
-          contextBlocks.push(`- ${f}`);
-        contextBlocks.push("");
+          output.context.push(`- ${f}`);
+        output.context.push("");
       }
-      return {
-        context: contextBlocks.join(`
-`),
-        compaction_prompt: "Preserve: 1) Current task status, 2) Key decisions, 3) Active files, 4) Remaining work, 5) Security concerns. Discard verbose tool outputs and redundant file listings."
-      };
     },
     "file.edited": async (event) => {
       editedFiles.add(event.path);
@@ -12766,19 +12832,6 @@ $ARGUMENTS`,
       const filePath = input.args?.filePath;
       if ((input.tool === "edit" || input.tool === "write") && filePath) {
         editedFiles.add(filePath);
-      }
-      if (input.tool === "edit" && filePath?.match(/\.tsx?$/)) {
-        try {
-          await $`npx tsc --noEmit 2>&1`;
-        } catch {
-          await client.app.log({
-            body: {
-              service: "openecc",
-              level: "warn",
-              message: "TypeScript errors detected after edit \u2014 run `npx tsc --noEmit` to see details"
-            }
-          });
-        }
       }
     },
     "session.idle": async () => {
@@ -12811,17 +12864,14 @@ $ARGUMENTS`,
     },
     "session.deleted": async () => {
       editedFiles.clear();
-      pendingToolChanges.clear();
     },
-    "shell.env": async () => {
-      const env = {
-        ECC_VERSION: "1.0.0",
-        ECC_PLUGIN: "true",
-        PROJECT_ROOT: worktreePath
-      };
+    "shell.env": async (_input, output) => {
+      output.env.ECC_VERSION = "1.0.0";
+      output.env.ECC_PLUGIN = "true";
+      output.env.PROJECT_ROOT = worktreePath;
       const pm = detectPackageManager(worktreePath);
       if (pm)
-        env.PACKAGE_MANAGER = pm;
+        output.env.PACKAGE_MANAGER = pm;
       const langDetectors = {
         "tsconfig.json": "typescript",
         "go.mod": "go",
@@ -12834,10 +12884,9 @@ $ARGUMENTS`,
           detected.push(lang);
       }
       if (detected.length > 0) {
-        env.DETECTED_LANGUAGES = detected.join(",");
-        env.PRIMARY_LANGUAGE = detected[0];
+        output.env.DETECTED_LANGUAGES = detected.join(",");
+        output.env.PRIMARY_LANGUAGE = detected[0];
       }
-      return env;
     },
     tool: {
       "run-tests": runTestsTool,

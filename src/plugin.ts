@@ -6,32 +6,104 @@ import { execSync } from "node:child_process"
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const skillsDir = path.resolve(__dirname, "..", "skills")
-const promptsDir = path.resolve(__dirname, "..", "prompts")
 const agentsDir = path.resolve(__dirname, "..", "prompts", "agents")
 const commandsDir = path.resolve(__dirname, "..", "commands")
 const agentsMDPath = path.resolve(__dirname, "..", "..", "AGENTS.md")
 
-let _soulCache: string | null = null
+const DELEGATOR_ROLE = `## Your Role (OpenECC Delegator)
 
-function getSoulContent(): string | null {
-  if (_soulCache !== null) return _soulCache
+Your primary job is to delegate, synthesize, and verify — not to do work directly.
+
+### When to delegate to a subagent (@mention):
+- Planning / architecture → @planner
+- Code review / quality → @code-reviewer
+- Security review → @security-reviewer
+- Build/type errors → @build-error-resolver
+- Test-first development → @tdd-guide
+- E2E tests → @e2e-runner
+- Documentation → @doc-updater / @docs-lookup
+- Dead code cleanup → @refactor-cleaner
+- Language-specific (Go/Rust/C++/Java/Kotlin/Python) → respective reviewer
+- Complex multi-step tasks → @planner (orchestrate mode)
+
+### When to load a skill:
+- API design → skill tool → api-design
+- Backend patterns → skill tool → backend-patterns
+- Frontend patterns → skill tool → frontend-patterns
+- Testing patterns → skill tool → tdd-workflow / e2e-testing
+- Security review → skill tool → security-review
+
+### When to answer directly:
+- Simple factual questions
+- Quick clarifications ("what is X?")
+- Status checks
+- Anything that requires zero tools
+
+### Completion protocol:
+1. **Verify before claiming** — run the command, read the output, then speak
+2. **Synthesize** — distill subagent results into 3-5 sentences max
+3. **Signature** — end with \`---\` and a brief status summary`
+
+const QUICK_ROUTING = `### Quick Routing
+Task \\u2192 Subagent:
+  plan/architect   \\u2192 @planner
+  code review      \\u2192 @code-reviewer
+  security         \\u2192 @security-reviewer
+  build/type error \\u2192 @build-error-resolver
+  test-first/TDD   \\u2192 @tdd-guide
+  docs             \\u2192 @doc-updater / @docs-lookup
+  cleanup/refactor \\u2192 @refactor-cleaner
+  debug            \\u2192 @build-error-resolver
+  e2e              \\u2192 @e2e-runner
+  language-specific \\u2192 <lang>-reviewer / <lang>-build-resolver
+  complex multi    \\u2192 @planner (orchestrate)
+
+Skill \\u2192 Task:
+  api-design          \\u2192 API routes, resources, pagination
+  backend-patterns    \\u2192 Node.js, Express, Next.js API
+  frontend-patterns   \\u2192 React, Next.js, state, UI
+  tdd-workflow        \\u2192 red-green-refactor, 80% coverage
+  e2e-testing         \\u2192 Playwright, Page Object Model
+  security-review     \\u2192 auth, input validation, secrets
+  coding-standards    \\u2192 naming, immutability, quality
+  verification-loop   \\u2192 build, types, lint, test, security
+  strategic-compact   \\u2192 context compaction strategy
+  api-security        \\u2192 authZ, rate limiting, OWASP`
+
+const COMPLETION_CONTRACT = `### Before responding
+1. Did you delegate analysis/planning work to a subagent when appropriate?
+2. Did you verify results (not assume)?
+3. Is the response concise and synthesized?
+
+When done: place \`---\` followed by \`**Status:** \\u2705 Done | \\u1f6a7 Blocked | \\ud83d\\udd04 In Progress\``
+
+let _bootstrapCache: string | null = null
+
+function getBootstrapContent(): string | null {
+  if (_bootstrapCache !== null) return _bootstrapCache
 
   const soulPath = path.join(skillsDir, "soul", "SKILL.md")
   if (!fs.existsSync(soulPath)) {
-    _soulCache = null
+    _bootstrapCache = null
     return null
   }
 
   const fullContent = fs.readFileSync(soulPath, "utf8")
-  const content = fullContent.replace(/^---[\s\S]*?---\n/, "")
+  const soulContent = fullContent.replace(/^---[\s\S]*?---\n/, "")
 
-  _soulCache = `<EXTREMELY_IMPORTANT>
+  _bootstrapCache = `<EXTREMELY_IMPORTANT>
 You have a soul — the principles below are always active. They are ALREADY LOADED.
 
-${content}
-</EXTREMELY_IMPORTANT>`
+${soulContent}
+</EXTREMELY_IMPORTANT>
 
-  return _soulCache
+${DELEGATOR_ROLE}
+
+${QUICK_ROUTING}
+
+${COMPLETION_CONTRACT}`
+
+  return _bootstrapCache
 }
 
 function readFileSafe(filePath: string): string {
@@ -290,7 +362,7 @@ const securityAuditTool = tool({
 
 export const OpenECCPlugin: Plugin = async ({ client, directory, $, worktree }) => {
   const worktreePath = worktree || directory
-  const soul = getSoulContent()
+  const bootstrap = getBootstrapContent()
 
   const agents = [
     { name: "planner", desc: "Expert planning specialist. Use for implementation plans, architectural changes, or complex refactoring.", model: "claude-opus-4-5", tools: { read: true, bash: true, write: false, edit: false } },
@@ -404,35 +476,33 @@ export const OpenECCPlugin: Plugin = async ({ client, directory, $, worktree }) 
     },
 
     "experimental.chat.messages.transform": async (_input, output) => {
-      if (!soul || !output.messages?.length) return
+      if (!bootstrap || !output.messages?.length) return
       const firstUser = output.messages.find((m: any) => m.info?.role === "user")
       if (!firstUser || !firstUser.parts?.length) return
       if (firstUser.parts.some((p: any) => p.type === "text" && p.text?.includes("EXTREMELY_IMPORTANT"))) return
 
-      const ref = firstUser.parts[0]
-      firstUser.parts.unshift({ ...ref, type: "text", text: soul })
+      firstUser.parts.unshift({
+        type: "text",
+        text: bootstrap,
+        id: firstUser.parts[0].id,
+        sessionID: (firstUser.parts[0] as any).sessionID,
+        messageID: (firstUser.parts[0] as any).messageID,
+      })
     },
 
-    "experimental.session.compacting": async () => {
-      const contextBlocks = [
-        "# OpenECC Context (preserve across compaction)",
-        "",
-        "## Active Soul",
-        "- Think Before Coding: surface assumptions. Don't hide confusion.",
-        "- Simplicity First: minimum code. Nothing speculative.",
-        "- Surgical Changes: touch only what you must.",
-        "- Goal-Driven Execution: define verifiable success criteria.",
-        "",
-      ]
+    "experimental.session.compacting": async (_input, output) => {
+      output.context.push("# OpenECC Context (preserve across compaction)")
+      output.context.push("")
+      output.context.push("## OpenECC Delegator")
+      output.context.push("- Primary role: delegate to subagents, synthesize results, verify before claiming")
+      output.context.push("- Soul: Think Before Coding, Simplicity First, Surgical Changes, Goal-Driven Execution")
+      output.context.push("- Route by task type: planning, review, build-fix, TDD, docs, language-specific")
+      output.context.push("- Answer directly when no tools are needed")
+      output.context.push("")
       if (editedFiles.size > 0) {
-        contextBlocks.push("## Recently Edited Files")
-        for (const f of editedFiles) contextBlocks.push(`- ${f}`)
-        contextBlocks.push("")
-      }
-      return {
-        context: contextBlocks.join("\n"),
-        compaction_prompt:
-          "Preserve: 1) Current task status, 2) Key decisions, 3) Active files, 4) Remaining work, 5) Security concerns. Discard verbose tool outputs and redundant file listings.",
+        output.context.push("## Recently Edited Files")
+        for (const f of editedFiles) output.context.push(`- ${f}`)
+        output.context.push("")
       }
     },
 
@@ -494,14 +564,13 @@ export const OpenECCPlugin: Plugin = async ({ client, directory, $, worktree }) 
       editedFiles.clear()
     },
 
-    "shell.env": async () => {
-      const env: Record<string, string> = {
-        ECC_VERSION: "1.0.0",
-        ECC_PLUGIN: "true",
-        PROJECT_ROOT: worktreePath,
-      }
+    "shell.env": async (_input, output) => {
+      output.env.ECC_VERSION = "1.0.0"
+      output.env.ECC_PLUGIN = "true"
+      output.env.PROJECT_ROOT = worktreePath
+
       const pm = detectPackageManager(worktreePath)
-      if (pm) env.PACKAGE_MANAGER = pm
+      if (pm) output.env.PACKAGE_MANAGER = pm
 
       const langDetectors: Record<string, string> = {
         "tsconfig.json": "typescript",
@@ -514,10 +583,9 @@ export const OpenECCPlugin: Plugin = async ({ client, directory, $, worktree }) 
         if (resolveProjectFile(worktreePath, file)) detected.push(lang)
       }
       if (detected.length > 0) {
-        env.DETECTED_LANGUAGES = detected.join(",")
-        env.PRIMARY_LANGUAGE = detected[0]
+        output.env.DETECTED_LANGUAGES = detected.join(",")
+        output.env.PRIMARY_LANGUAGE = detected[0]
       }
-      return env
     },
 
     tool: {
