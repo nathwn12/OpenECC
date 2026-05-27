@@ -3,6 +3,9 @@ import * as path from "node:path"
 import { fileURLToPath } from "node:url"
 import * as fs from "node:fs"
 import { execSync } from "node:child_process"
+import { detectProject, type ProjectProfile } from "./routing/detect"
+import { buildAgentRegistry, buildSkillRegistry } from "./routing/registry"
+import { autoDelegate as autoDelegateFn, analyzeTask as analyzeTaskFn } from "./routing/classifier"
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const skillsDir = path.resolve(__dirname, "..", "skills")
@@ -77,33 +80,62 @@ const COMPLETION_CONTRACT = `### Before responding
 
 When done: place \`---\` followed by \`**Status:** \\u2705 Done | \\u1f6a7 Blocked | \\ud83d\\udd04 In Progress\``
 
-let _bootstrapCache: string | null = null
+let _projectProfile: ProjectProfile | null = null
+let _skillRegistryCache: ReturnType<typeof buildSkillRegistry> | null = null
+let _delegationDepth = 0
+let _ignoredRecommendations = 0
+const _capturedResults = new Map<string, any>()
 
-function getBootstrapContent(): string | null {
-  if (_bootstrapCache !== null) return _bootstrapCache
+function buildProjectProfileSection(p: ProjectProfile): string {
+  const lines: string[] = []
+  lines.push("### Project Profile (auto-detected)")
+  if (p.languages.length > 0) lines.push(`- Languages: ${p.languages.join(", ")}`)
+  if (p.frameworks.length > 0) lines.push(`- Frameworks: ${p.frameworks.join(", ")}`)
+  if (p.testFrameworks.length > 0) lines.push(`- Test tools: ${p.testFrameworks.join(", ")}`)
+  lines.push(`- Package manager: ${p.packageManager}`)
+  lines.push("")
 
-  const soulPath = path.join(skillsDir, "soul", "SKILL.md")
-  if (!fs.existsSync(soulPath)) {
-    _bootstrapCache = null
-    return null
+  const subagentLines: string[] = []
+  const langAgentMap: Record<string, string[]> = {
+    go: ["go-reviewer", "go-build-resolver"],
+    rust: ["rust-reviewer", "rust-build-resolver"],
+    python: ["python-reviewer"],
+    typescript: [],
+  }
+  for (const lang of p.languages) {
+    const agents = langAgentMap[lang] || []
+    for (const agent of agents) {
+      subagentLines.push(`- @${agent} — ${lang} code detected`)
+    }
+  }
+  for (const tf of p.testFrameworks) {
+    if (tf === "jest" || tf === "vitest") subagentLines.push("- @tdd-guide — tests detected")
+    if (tf === "playwright") subagentLines.push("- @e2e-runner — Playwright detected")
+  }
+  if (subagentLines.length > 0) {
+    lines.push("### Priority Subagents")
+    lines.push(...subagentLines)
+    lines.push("")
   }
 
-  const fullContent = fs.readFileSync(soulPath, "utf8")
-  const soulContent = fullContent.replace(/^---[\s\S]*?---\n/, "")
+  const skillLines: string[] = []
+  for (const fw of p.frameworks) {
+    if (fw === "nextjs") skillLines.push("- frontend-patterns — Next.js framework")
+    if (fw === "angular") skillLines.push("- angular-best-practices — Angular framework")
+  }
+  if (p.testFrameworks.includes("playwright")) skillLines.push("- e2e-testing — Playwright detected")
+  if (p.testFrameworks.some(t => t === "jest" || t === "vitest")) skillLines.push("- tdd-workflow — tests detected")
+  if (p.languages.some(l => l === "javascript" || l === "typescript")) {
+    skillLines.push("- backend-patterns — JS/TS backend support")
+  }
+  if (skillLines.length > 0) {
+    lines.push("### Recommended Skills")
+    lines.push(...skillLines)
+    lines.push("")
+  }
 
-  _bootstrapCache = `<EXTREMELY_IMPORTANT>
-You have a soul — the principles below are always active. They are ALREADY LOADED.
-
-${soulContent}
-</EXTREMELY_IMPORTANT>
-
-${DELEGATOR_ROLE}
-
-${QUICK_ROUTING}
-
-${COMPLETION_CONTRACT}`
-
-  return _bootstrapCache
+  lines.push("At the start of each significant task, use `auto-delegate` to get routing recommendations.")
+  return lines.join("\n")
 }
 
 function readFileSafe(filePath: string): string {
@@ -360,9 +392,52 @@ const securityAuditTool = tool({
   },
 })
 
+const autoDelegateTool = tool({
+  description: "Analyze a user message and recommend which subagent(s) and skill(s) to use. Calls the classification engine with project context for relevance scoring.",
+  args: {
+    message: tool.schema.string().describe("The user's task description or question"),
+    as: tool.schema.string().optional().describe("Optional name to store this result under for later reference"),
+  },
+  async execute(args, context) {
+    _delegationDepth++
+
+    if (_delegationDepth >= 2) {
+      return JSON.stringify({
+        task: "general",
+        confidence: 0,
+        recommendedAgents: [],
+        recommendedSkills: [],
+        reasoning: "Loop guard active: delegation depth limit reached. Subagents cannot delegate further.",
+      }, null, 2)
+    }
+
+    const cwd = context.worktree || context.directory
+    const profile = detectProject(cwd)
+    const agentRegistry = buildAgentRegistry()
+    const skillRegistry = buildSkillRegistry(skillsDir)
+    const result = autoDelegateFn(args.message, profile, agentRegistry, skillRegistry)
+
+    if (args.as) {
+      _capturedResults.set(args.as, result)
+    }
+
+    return JSON.stringify(result, null, 2)
+  },
+})
+
+const analyzeTaskTool = tool({
+  description: "Classify a user message into a task category and extract keywords. Does not use project context.",
+  args: {
+    message: tool.schema.string().describe("The user's task description or question"),
+  },
+  async execute(args, _context) {
+    const result = analyzeTaskFn(args.message)
+    return JSON.stringify(result, null, 2)
+  },
+})
+
 export const OpenECCPlugin: Plugin = async ({ client, directory, $, worktree }) => {
   const worktreePath = worktree || directory
-  const bootstrap = getBootstrapContent()
 
   const agents = [
     { name: "planner", desc: "Expert planning specialist for complex features and refactoring. Use for implementation planning, architectural changes, or complex refactoring. Trigger: when a task needs structured planning before coding.", permission: { edit: "deny", write: "deny", task: "deny" } },
@@ -476,15 +551,74 @@ export const OpenECCPlugin: Plugin = async ({ client, directory, $, worktree }) 
       }
     },
 
+    "experimental.chat.system.transform": async (_input, output) => {
+      if (!_projectProfile) {
+        _projectProfile = detectProject(worktreePath)
+      }
+
+      const soulPath = path.join(skillsDir, "soul", "SKILL.md")
+      const soulContent = readFileSafe(soulPath)
+      const cleanSoul = soulContent.replace(/^---[\s\S]*?---\n/, "")
+
+      const systemBootstrap = `<EXTREMELY_IMPORTANT>
+You have a soul — the principles below are always active. They are ALREADY LOADED.
+
+${cleanSoul}
+</EXTREMELY_IMPORTANT>
+
+${DELEGATOR_ROLE}
+
+${QUICK_ROUTING}
+
+${COMPLETION_CONTRACT}
+
+${buildProjectProfileSection(_projectProfile)}`
+
+      const systemMessages: any[] = (output as any).systemMessages || []
+      if (!systemMessages.some((p: any) => p.text?.includes("EXTREMELY_IMPORTANT"))) {
+        systemMessages.unshift({ type: "text", text: systemBootstrap })
+        ;(output as any).systemMessages = systemMessages
+      }
+    },
+
     "experimental.chat.messages.transform": async (_input, output) => {
-      if (!bootstrap || !output.messages?.length) return
+      if (!output.messages?.length) return
       const firstUser = output.messages.find((m: any) => m.info?.role === "user")
       if (!firstUser || !firstUser.parts?.length) return
       if (firstUser.parts.some((p: any) => p.type === "text" && p.text?.includes("EXTREMELY_IMPORTANT"))) return
 
+      if (!_skillRegistryCache) {
+        _skillRegistryCache = buildSkillRegistry(skillsDir)
+      }
+      const firstTextPart: any = firstUser.parts.find((p: any) => p.type === "text")
+      const firstUserText = firstTextPart?.text || ""
+      if (firstUserText.length >= 2000) return
+
+      const taskAnalysis = analyzeTaskFn(firstUserText.slice(0, 500))
+      if (taskAnalysis.category === "general") return
+
+      const skillEntries = Object.entries(_skillRegistryCache)
+      const matchResults = skillEntries.map(([name, trigger]) => {
+        const tokens = firstUserText.toLowerCase().split(/[\s,;:.!?()]+/).filter((w: string) => w.length > 1)
+        const lowerKeywords = trigger.keywords.map(k => k.toLowerCase())
+        const matches = tokens.filter((t: string) => lowerKeywords.includes(t)).length
+        const confidence = trigger.keywords.length > 0 ? matches / Math.max(trigger.keywords.length, 1) : 0
+        return { name, confidence, trigger }
+      })
+      matchResults.sort((a: any, b: any) => b.confidence - a.confidence)
+      const topSkill = matchResults[0]
+      if (!topSkill || topSkill.confidence < 0.7) return
+
+      const skillPath = path.join(skillsDir, topSkill.name, "SKILL.md")
+      const skillContent = readFileSafe(skillPath)
+      const cleanContent = stripYamlFrontmatter(skillContent)
+      if (!cleanContent) return
+
+      const autoLoadedSkill = `\n### Auto-Loaded Skill: ${topSkill.name}\n(injected based on task analysis)\n${cleanContent.slice(0, 3000)}\n`
+
       firstUser.parts.unshift({
         type: "text",
-        text: bootstrap,
+        text: autoLoadedSkill,
         id: firstUser.parts[0].id,
         sessionID: (firstUser.parts[0] as any).sessionID,
         messageID: (firstUser.parts[0] as any).messageID,
@@ -500,6 +634,25 @@ export const OpenECCPlugin: Plugin = async ({ client, directory, $, worktree }) 
       output.context.push("- Route by task type: planning, review, build-fix, TDD, docs, language-specific")
       output.context.push("- Answer directly when no tools are needed")
       output.context.push("")
+      if (_projectProfile) {
+        output.context.push("## Project Profile")
+        output.context.push(`- Languages: ${_projectProfile.languages.join(", ") || "none detected"}`)
+        if (_projectProfile.frameworks.length > 0) {
+          output.context.push(`- Frameworks: ${_projectProfile.frameworks.join(", ")}`)
+        }
+        if (_projectProfile.testFrameworks.length > 0) {
+          output.context.push(`- Test tools: ${_projectProfile.testFrameworks.join(", ")}`)
+        }
+        output.context.push(`- Package manager: ${_projectProfile.packageManager}`)
+        output.context.push("")
+      }
+      if (_capturedResults.size > 0) {
+        output.context.push("## Captured Delegation Results")
+        for (const [name] of _capturedResults) {
+          output.context.push(`- ${name}: available`)
+        }
+        output.context.push("")
+      }
       if (editedFiles.size > 0) {
         output.context.push("## Recently Edited Files")
         for (const f of editedFiles) output.context.push(`- ${f}`)
@@ -535,6 +688,12 @@ export const OpenECCPlugin: Plugin = async ({ client, directory, $, worktree }) 
     },
 
     "session.idle": async () => {
+      _delegationDepth = 0
+
+      if (_ignoredRecommendations >= 3) {
+        _ignoredRecommendations = 0
+      }
+
       if (editedFiles.size === 0) return
 
       let count = 0
@@ -596,6 +755,8 @@ export const OpenECCPlugin: Plugin = async ({ client, directory, $, worktree }) 
       "format-code": formatCodeTool,
       "lint-check": lintCheckTool,
       "security-audit": securityAuditTool,
+      "auto-delegate": autoDelegateTool,
+      "analyze-task": analyzeTaskTool,
     },
   }
 }
