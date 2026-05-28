@@ -279,6 +279,19 @@ Before calling any tool, check:
 | `format-code` | Detect formatter and return format command |
 | `lint-check` | Detect linter and return lint command |
 | `security-audit` | Three-phase: dependency audit, secret scan, code anti-pattern check |
+| `analyze-task` | Classify a user message into a task category and extract keywords |
+| `auto-delegate` | Analyze a user message and recommend which subagent(s) and skill(s) to use |
+
+### Auto-Delegation Intelligence
+
+OpenECC includes an auto-delegation system that analyzes user messages and recommends the best subagent and skill for the task. It works by:
+
+1. **Task classification** — Categorizes input into planning, review, build-fix, test, docs, security, debug, refactor, or general
+2. **Project detection** — Scans the workspace for languages, frameworks, test tools, and config files
+3. **Agent/skill matching** — Scores agents and skills against task keywords and project profile
+4. **Confidence scoring** — Returns ranked recommendations with confidence scores
+
+The `auto-delegate` tool returns recommended agents and skills. The system also auto-injects project context (detected languages, frameworks, priority subagents) into the session at startup.
 
 ---
 
