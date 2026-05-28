@@ -1,6 +1,6 @@
 ---
 description: "Fix Rust compilation and build errors"
-agent: openecc:rust-build-resolver
+agent: rust-build-resolver
 subtask: true
 ---
 

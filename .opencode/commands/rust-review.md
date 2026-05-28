@@ -1,6 +1,6 @@
 ---
 description: "Review Rust code for safety, idiomatic patterns, and correctness"
-agent: openecc:rust-reviewer
+agent: rust-reviewer
 subtask: true
 ---
 

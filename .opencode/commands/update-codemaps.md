@@ -1,6 +1,6 @@
 ---
 description: "Update codemaps to reflect current codebase structure"
-agent: openecc:doc-updater
+agent: doc-updater
 subtask: true
 ---
 

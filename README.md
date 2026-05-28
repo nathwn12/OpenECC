@@ -197,6 +197,8 @@ Invoke with `@planner`, `@code-reviewer`, etc.
 |------|---------|
 | `run-tests` | Auto-detect PM + test framework, build test commands |
 | `changed-files` | List files modified in current session |
+| `analyze-task` | Classify a user message into a task category and extract keywords |
+| `auto-delegate` | Analyze a user message and recommend which subagent(s) and skill(s) to use |
 | `git-summary` | Show branch, status, recent commits, staged/unstaged diffs |
 | `format-code` | Detect formatter and return format command |
 | `lint-check` | Detect linter and return lint command |

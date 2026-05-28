@@ -1,5 +1,6 @@
 ---
 description: "Enforce TDD workflow with 80%+ test coverage"
+agent: tdd-guide
 ---
 
 # TDD Command

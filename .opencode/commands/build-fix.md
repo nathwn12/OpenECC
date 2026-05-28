@@ -1,6 +1,6 @@
 ---
 description: "Fix build and TypeScript errors"
-agent: openecc:build-error-resolver
+agent: build-error-resolver
 subtask: true
 ---
 

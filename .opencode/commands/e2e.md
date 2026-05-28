@@ -1,6 +1,6 @@
 ---
 description: "Generate and run Playwright E2E tests"
-agent: openecc:e2e-runner
+agent: e2e-runner
 subtask: true
 ---
 

@@ -1,6 +1,6 @@
 ---
 description: "Analyze test coverage and identify gaps"
-agent: openecc:tdd-guide
+agent: tdd-guide
 subtask: true
 ---
 

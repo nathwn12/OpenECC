@@ -1,5 +1,6 @@
 ---
 description: "Run comprehensive security review using OWASP guidelines"
+agent: security-reviewer
 ---
 
 # Security Review Command

@@ -1,6 +1,6 @@
 ---
 description: "Rust TDD workflow: write tests, implement, verify"
-agent: openecc:tdd-guide
+agent: tdd-guide
 subtask: true
 ---
 

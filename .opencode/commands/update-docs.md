@@ -1,6 +1,6 @@
 ---
 description: "Update project documentation to match current codebase state"
-agent: openecc:doc-updater
+agent: doc-updater
 subtask: true
 ---
 

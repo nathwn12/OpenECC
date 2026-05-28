@@ -1,6 +1,6 @@
 ---
 description: "Review Go code for idiomatic patterns and correctness"
-agent: openecc:go-reviewer
+agent: go-reviewer
 subtask: true
 ---
 

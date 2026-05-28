@@ -1,6 +1,6 @@
 ---
 description: "Fix Go compilation and build errors"
-agent: openecc:go-build-resolver
+agent: go-build-resolver
 subtask: true
 ---
 

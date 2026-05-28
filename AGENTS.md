@@ -105,6 +105,45 @@ Before marking work complete:
 - No hardcoded values
 - No mutation (immutable patterns used)
 
+## Common Patterns
+
+### API Response Format
+```typescript
+interface ApiResponse<T> {
+  success: boolean
+  data?: T
+  error?: string
+  meta?: {
+    total: number
+    page: number
+    limit: number
+  }
+}
+```
+
+### Custom Hooks Pattern
+```typescript
+export function useDebounce<T>(value: T, delay: number): T {
+  const [debouncedValue, setDebouncedValue] = useState<T>(value)
+  useEffect(() => {
+    const handler = setTimeout(() => setDebouncedValue(value), delay)
+    return () => clearTimeout(handler)
+  }, [value, delay])
+  return debouncedValue
+}
+```
+
+### Repository Pattern
+```typescript
+interface Repository<T> {
+  findAll(filters?: Filters): Promise<T[]>
+  findById(id: string): Promise<T | null>
+  create(data: CreateDto): Promise<T>
+  update(id: string, data: UpdateDto): Promise<T>
+  delete(id: string): Promise<void>
+}
+```
+
 ---
 
 ## Testing Requirements
@@ -146,7 +185,7 @@ Types: feat, fix, refactor, docs, test, chore, perf, ci
 ### Feature Implementation Workflow
 1. **Plan** — Use planner agent or `/plan` command
 2. **TDD** — Use tdd-guide agent or `/tdd` command
-3. **Code Review** — Use code-reviewer agent or `/review` command
+3. **Code Review** — Use code-reviewer agent or `/code-review` command
 4. **Security Review** — Use security-reviewer agent or `/security`
 5. **Quality Gate** — Run `/quality-gate` before committing
 
@@ -154,12 +193,79 @@ Types: feat, fix, refactor, docs, test, chore, perf, ci
 
 ## Available Agents
 
-| Agent | Purpose | Command |
-|-------|---------|---------|
-| planner | Implementation planning | `/plan` |
-| code-reviewer | Code quality and security review | `/review` |
-| security-reviewer | Security vulnerability analysis | `/security` |
-| tdd-guide | Test-driven development | `/tdd` |
+| Agent | Purpose | When to Use |
+|-------|---------|-------------|
+| planner | Implementation planning | Complex features, refactoring |
+| architect | System design | Architectural decisions |
+| tdd-guide | Test-driven development | New features, bug fixes |
+| code-reviewer | Code quality and security review | After writing code |
+| security-reviewer | Security vulnerability analysis | Before commits |
+| build-error-resolver | Fix build errors | When build fails |
+| e2e-runner | E2E testing | Critical user flows |
+| refactor-cleaner | Dead code cleanup | Code maintenance |
+| doc-updater | Documentation | Updating docs |
+| docs-lookup | API reference research | Library documentation lookups |
+| database-reviewer | Database optimization | SQL, schema design |
+| go-reviewer | Go code review | Go projects |
+| go-build-resolver | Go build errors | Go build failures |
+| python-reviewer | Python code review | Python projects |
+| rust-reviewer | Rust code review | Rust projects |
+| rust-build-resolver | Rust build errors | Rust build failures |
+| java-reviewer | Java/Spring Boot review | Java projects |
+| java-build-resolver | Java build errors | Java build failures |
+| kotlin-reviewer | Kotlin/Android review | Kotlin projects |
+| kotlin-build-resolver | Kotlin build errors | Kotlin build failures |
+| cpp-reviewer | C++ code review | C++ projects |
+| cpp-build-resolver | C++ build errors | C++ build failures |
+
+### Immediate Agent Usage
+No user prompt needed:
+1. Complex feature requests → Use **planner** agent + `/plan`
+2. Code just written/modified → Use **code-reviewer** agent + `/code-review`
+3. Bug fix or new feature → Use **tdd-guide** agent + `/tdd`
+4. Architectural decision → Use **architect** agent
+5. Security-sensitive code → Use **security-reviewer** agent + `/security`
+
+### Commands Available
+- `/plan` — Create implementation plan with risk assessment
+- `/tdd` — Enforce TDD workflow (RED → GREEN → REFACTOR)
+- `/code-review` — Review code changes
+- `/security` — Run security review
+- `/build-fix` — Fix build errors
+- `/e2e` — Generate E2E tests
+- `/refactor-clean` — Remove dead code
+- `/orchestrate` — Multi-agent workflow
+- `/verify` — Run full verification pipeline
+
+---
+
+---
+
+## Delegation Enforcement (HARD RULES)
+
+These are NOT optional. Violations are bugs.
+
+### Tool Access Control
+OpenECC enforces tool-level delegation via system prompt injection and tool definition rewriting.
+
+**MAIN CONTEXT (TALK + DELEGATE only):**
+- `task` — spawn subagents for all discrete work
+- `skill` — discover and load domain skills
+- `todowrite` — track task progress
+- `question` — ask clarifying questions
+- `read`, `webfetch` — read-only context gathering (sparingly)
+
+**SUBAGENT CONTEXT ONLY (NEVER main context):**
+- `edit`, `write` — editing/creating source files (use `@builder`)
+- `bash` — running commands (use `@executor`)
+- `glob`, `grep` — searching the codebase (use `@explorer`)
+
+### Self-Audit Before Every Tool Call
+Before calling any tool, check:
+1. Does this tool modify files? → **Delegate via `task`**
+2. Does this tool run commands? → **Delegate via `task`**
+3. Does this tool search source code? → **Delegate via `task`**
+4. Am I doing work instead of delegating? → **STOP. Spawn a subagent.**
 
 ---
 
@@ -173,3 +279,19 @@ Types: feat, fix, refactor, docs, test, chore, perf, ci
 | `format-code` | Detect formatter and return format command |
 | `lint-check` | Detect linter and return lint command |
 | `security-audit` | Three-phase: dependency audit, secret scan, code anti-pattern check |
+
+---
+
+## OpenCode-Specific Notes
+
+Since OpenCode does not support hooks, the following actions that were automated in Claude Code must be done manually:
+
+### After Writing/Editing Code
+- Run `prettier --write <file>` to format JS/TS files
+- Run `npx tsc --noEmit` to check for TypeScript errors
+- Check for console.log statements and remove them
+
+### Before Committing
+- Run security checks manually
+- Verify no secrets in code
+- Run full test suite
