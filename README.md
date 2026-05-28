@@ -64,6 +64,16 @@ bun install
 bun run bundle
 ```
 
+## Clearing Cache
+
+Remove OpenECC's cached package to force a fresh install:
+
+```powershell
+Remove-Item "$env:USERPROFILE\.cache\opencode\packages\openecc@git+https_\github.com\nathwn12" -Recurse -Force
+```
+
+Then restart OpenCode — it will re-fetch the plugin on next launch.
+
 ## License
 
 MIT

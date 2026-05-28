@@ -304,6 +304,16 @@ The `auto-delegate` tool returns recommended agents and skills. The system also 
 
 ---
 
+## Clearing Cache
+
+To force a fresh install of OpenECC, delete its cached package directory:
+
+```powershell
+Remove-Item "$env:USERPROFILE\.cache\opencode\packages\openecc@git+https_\github.com\nathwn12" -Recurse -Force
+```
+
+Then restart OpenCode.
+
 ## OpenCode-Specific Notes
 
 Since OpenCode does not support hooks, the following actions that were automated in Claude Code must be done manually:
