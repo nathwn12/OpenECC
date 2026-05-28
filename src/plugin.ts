@@ -118,7 +118,6 @@ When done: place \`---\` followed by \`**Status:** \\u2705 Done | \\u1f6a7 Block
 let _projectProfile: ProjectProfile | null = null
 let _skillRegistryCache: ReturnType<typeof buildSkillRegistry> | null = null
 let _delegationDepth = 0
-let _ignoredRecommendations = 0
 const _capturedResults = new Map<string, any>()
 
 function buildProjectProfileSection(p: ProjectProfile): string {
@@ -499,6 +498,12 @@ export const OpenECCPlugin: Plugin = async ({ client, directory, $, worktree }) 
     { name: "kotlin-reviewer", desc: "Kotlin and Android reviewer specializing in coroutines, Jetpack Compose, and idiomatic patterns. Use after writing Kotlin/Android code. Trigger: when Kotlin or Android code has been written or modified.", permission: { edit: "deny", write: "deny", task: "deny" } },
     { name: "kotlin-build-resolver", desc: "Kotlin/Gradle build error resolution specialist. Use when Kotlin or Gradle builds fail. Fixes with minimal changes. Trigger: when Kotlin compilation or Gradle configuration errors occur.", permission: { task: "deny" } },
     { name: "database-reviewer", desc: "PostgreSQL and Supabase database specialist for query optimization, schema design, and security. Use after writing database queries, migrations, or RLS policies. Trigger: when SQL queries, schema changes, or RLS policies need review.", permission: { task: "deny" } },
+    { name: "swarm-coordinator", desc: "Orchestrates full engineering pipeline: think → plan → review → build → test → ship → reflect. Spawns and coordinates multiple subagents in parallel. Hard max 5 live subagents. Use for end-to-end feature delivery. Trigger: when a complete engineering pipeline is needed from ideation to ship.", permission: { edit: "deny", write: "deny" } },
+    { name: "plan-ceo-reviewer", desc: "Reviews implementation plans from business/product perspective. Returns structured feedback: Block (critical issue), Warn (risky), Suggest (improvement), Questions (clarifications needed). Use when a plan needs business viability or product alignment review. Trigger: when a plan has been created and needs business/product review.", permission: { edit: "deny", write: "deny", task: "deny" } },
+    { name: "plan-design-reviewer", desc: "Reviews implementation plans from UX/design perspective. Returns structured feedback: Block (critical issue), Warn (risky), Suggest (improvement), Questions (clarifications needed). Use when a plan needs UX or design review. Trigger: when a plan has been created and needs design review.", permission: { edit: "deny", write: "deny", task: "deny" } },
+    { name: "plan-devex-reviewer", desc: "Reviews implementation plans from developer experience perspective. Returns structured feedback: Block (critical issue), Warn (risky), Suggest (improvement), Questions (clarifications needed). Use when a plan needs DX/API ergonomics review. Trigger: when a plan has been created and needs developer experience review.", permission: { edit: "deny", write: "deny", task: "deny" } },
+    { name: "plan-eng-reviewer", desc: "Reviews implementation plans from engineering/architecture perspective. Returns structured feedback: Block (critical issue), Warn (risky), Suggest (improvement), Questions (clarifications needed). Use when a plan needs technical architecture or engineering review. Trigger: when a plan has been created and needs engineering review.", permission: { edit: "deny", write: "deny", task: "deny" } },
+    { name: "goal-evaluator", desc: "Evaluates whether a swarm session goal has been met based on conversation context. Read-only: does not run commands or read files. Returns Met | Not Met | Partial with evidence and recommendations. Use as the completion gate in the /swarm pipeline. Trigger: after build and review phases to determine if the goal condition is satisfied.", permission: { edit: "deny", write: "deny", bash: "deny", glob: "deny", grep: "deny", task: "deny" } },
   ]
   const commands = [
     { name: "plan", desc: "Create a detailed implementation plan for complex features or refactoring", agent: "planner", subtask: true },
@@ -535,6 +540,8 @@ export const OpenECCPlugin: Plugin = async ({ client, directory, $, worktree }) 
     { name: "evolve", desc: "Cluster instincts into reusable skills" },
     { name: "promote", desc: "Promote project instincts to global scope" },
     { name: "projects", desc: "List known projects and instinct statistics" },
+    { name: "swarm", desc: "Execute full engineering pipeline: think → plan → review → build → test → evaluate → ship → reflect. Coordinates multiple subagents via the swarm-coordinator. The /swarm argument IS the goal condition, evaluated by goal-evaluator before shipping.", agent: "swarm-coordinator", subtask: true },
+    { name: "make", desc: "Alias for /swarm. Execute full engineering pipeline end-to-end.", agent: "swarm-coordinator", subtask: true },
   ]
 
   return {
@@ -629,6 +636,30 @@ ${buildProjectProfileSection(_projectProfile)}`
       if (!systemMessages.some((p: any) => p.text?.includes("EXTREMELY_IMPORTANT"))) {
         systemMessages.unshift({ type: "text", text: systemBootstrap })
         ;(output as any).systemMessages = systemMessages
+      }
+
+      try {
+        const indexJsonPath = path.join(worktreePath, ".openecc", "index.json")
+        if (fs.existsSync(indexJsonPath)) {
+          const indexData = JSON.parse(fs.readFileSync(indexJsonPath, "utf8"))
+          const activeId = indexData.activePlanId
+          const activePlan = indexData.plans?.find((p: any) => p.id === activeId)
+          if (activePlan) {
+            const planBlock = `<structured type="plan_state">
+active_plan: ${activePlan.id}
+status: ${activePlan.status || "unknown"}
+done: ${activePlan.done ?? 0}
+total: ${activePlan.total ?? 0}
+goal: ${activePlan.summary || ""}
+</structured>`
+            if (!systemMessages.some((p: any) => p.text?.includes("plan_state"))) {
+              systemMessages.push({ type: "text", text: planBlock })
+              ;(output as any).systemMessages = systemMessages
+            }
+          }
+        }
+      } catch {
+        // .openecc/index.json missing or invalid — skip silently
       }
     },
 
@@ -740,10 +771,6 @@ ${buildProjectProfileSection(_projectProfile)}`
 
     "session.idle": async () => {
       _delegationDepth = 0
-
-      if (_ignoredRecommendations >= 3) {
-        _ignoredRecommendations = 0
-      }
 
       if (editedFiles.size === 0) return
 

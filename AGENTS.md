@@ -183,11 +183,12 @@ Types: feat, fix, refactor, docs, test, chore, perf, ci
 5. Push with `-u` flag if new branch
 
 ### Feature Implementation Workflow
-1. **Plan** — Use planner agent or `/plan` command
-2. **TDD** — Use tdd-guide agent or `/tdd` command
-3. **Code Review** — Use code-reviewer agent or `/code-review` command
-4. **Security Review** — Use security-reviewer agent or `/security`
-5. **Quality Gate** — Run `/quality-gate` before committing
+1. **Top-Level Entrypoint** — Run `/swarm` for end-to-end orchestration with multi-axis review, approval gates, parallel build, and reflection. Plan state auto-injected into context from `.openecc/index.json`.
+2. **Plan** — Use planner agent or `/plan` command
+3. **TDD** — Use tdd-guide agent or `/tdd` command
+4. **Code Review** — Use code-reviewer agent or `/code-review` command
+5. **Security Review** — Use security-reviewer agent or `/security`
+6. **Quality Gate** — Run `/quality-gate` before committing
 
 ---
 
@@ -217,6 +218,12 @@ Types: feat, fix, refactor, docs, test, chore, perf, ci
 | kotlin-build-resolver | Kotlin build errors | Kotlin build failures |
 | cpp-reviewer | C++ code review | C++ projects |
 | cpp-build-resolver | C++ build errors | C++ build failures |
+| swarm-coordinator | End-to-end pipeline orchestration | Complex multi-step features requiring structured delivery |
+| plan-ceo-reviewer | Business/product review of plans | After planning before build |
+| plan-design-reviewer | UX/design review of plans | After planning before build |
+| plan-devex-reviewer | Developer experience review of plans | After planning before build |
+| plan-eng-reviewer | Architecture/engineering review of plans | After planning before build |
+| goal-evaluator | Goal completion evaluation | Checks if the /swarm goal is met from conversation context | Read-only, returns Met/Not Met/Partial |
 
 ### Immediate Agent Usage
 No user prompt needed:
@@ -236,6 +243,8 @@ No user prompt needed:
 - `/refactor-clean` — Remove dead code
 - `/orchestrate` — Multi-agent workflow
 - `/verify` — Run full verification pipeline
+- `/swarm` — Execute full engineering pipeline with multi-axis review, approval gates, parallel build, and reflection
+- `/make` — Alias for /swarm
 
 ---
 
