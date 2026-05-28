@@ -639,27 +639,30 @@ ${buildProjectProfileSection(_projectProfile)}`
       }
 
       try {
-        const indexJsonPath = path.join(worktreePath, ".openecc", "index.json")
-        if (fs.existsSync(indexJsonPath)) {
-          const indexData = JSON.parse(fs.readFileSync(indexJsonPath, "utf8"))
-          const activeId = indexData.activePlanId
-          const activePlan = indexData.plans?.find((p: any) => p.id === activeId)
-          if (activePlan) {
-            const planBlock = `<structured type="plan_state">
+        const openeccDir = path.join(worktreePath, ".openecc")
+        const indexJsonPath = path.join(openeccDir, "index.json")
+        if (!fs.existsSync(openeccDir)) fs.mkdirSync(openeccDir, { recursive: true })
+        if (!fs.existsSync(indexJsonPath)) {
+          fs.writeFileSync(indexJsonPath, JSON.stringify({ nextId: 1, activePlanId: null, plans: [] }, null, 2))
+        }
+        const indexData = JSON.parse(fs.readFileSync(indexJsonPath, "utf8"))
+        const activeId = indexData.activePlanId
+        const activePlan = indexData.plans?.find((p: any) => p.id === activeId)
+        if (activePlan) {
+          const planBlock = `<structured type="plan_state">
 active_plan: ${activePlan.id}
 status: ${activePlan.status || "unknown"}
 done: ${activePlan.done ?? 0}
 total: ${activePlan.total ?? 0}
 goal: ${activePlan.summary || ""}
 </structured>`
-            if (!systemMessages.some((p: any) => p.text?.includes("plan_state"))) {
-              systemMessages.push({ type: "text", text: planBlock })
-              ;(output as any).systemMessages = systemMessages
-            }
+          if (!systemMessages.some((p: any) => p.text?.includes("plan_state"))) {
+            systemMessages.push({ type: "text", text: planBlock })
+            ;(output as any).systemMessages = systemMessages
           }
         }
       } catch {
-        // .openecc/index.json missing or invalid — skip silently
+        // .openecc init or read failed — skip silently
       }
     },
 
