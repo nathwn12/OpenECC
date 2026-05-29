@@ -1,338 +1,48 @@
-# OpenECC — Engineering Code Companion
+# OpenECC — OpenCode Plugin
 
-This file provides persistent guidelines for every session.
+This is an OpenCode plugin, not a user-facing app. It provides engineering workflow automation (agent routing, command templates, project detection, skill auto-loading, swarm orchestration).
 
-## Soul Principles (Always Active)
+## Build & Dev
 
-### Think Before Coding
-- State assumptions explicitly. If uncertain, ask.
-- If multiple interpretations exist, present them — don't pick silently.
-- If a simpler approach exists, say so. Push back when warranted.
-- If something is unclear, stop. Name what's confusing. Ask.
+- **Install**: `bun install`
+- **Bundle**: `bun run bundle` — compiles `src/plugin.ts` → `.opencode/plugins/openecc.js` (Bun target, external `@opencode-ai/plugin`)
+- **No tests, linter, or formatter configured** in this repo. Typecheck errors are not gated.
+- **Dist vs reality**: `outDir` in tsconfig is `dist/`, but the actual output is `.opencode/plugins/openecc.js` (set in `package.json` `"main"` and `bundle` script)
 
-### Simplicity First
-- Minimum code that solves the problem. Nothing speculative.
-- No features beyond what was asked.
-- No abstractions for single-use code.
-- No error handling for impossible scenarios.
-- If you write 200 lines and it could be 50, rewrite it.
+## Architecture
 
-### Surgical Changes
-- Touch only what you must. Clean up only your own mess.
-- Don't "improve" adjacent code, comments, or formatting.
-- Don't refactor things that aren't broken.
-- Match existing style, even if you'd do it differently.
-- Remove imports/variables/functions that YOUR changes made unused.
+Image: src/plugin.ts is the single entrypoint. It registers tools, auto-injects system prompts (soul, delegation rules, project profile, plan state), hooks session events, and exposes commands.
 
-### Goal-Driven Execution
-- Define success criteria. Loop until verified.
-- "Add validation" → "Write tests for invalid inputs, then make them pass"
-- "Fix the bug" → "Write a test that reproduces it, then make it pass"
+| Directory | Purpose |
+|-----------|---------|
+| `src/` | Plugin TypeScript source (entrypoint: `plugin.ts`) |
+| `src/routing/` | Project detection, agent/skill registry, task classifier |
+| `.opencode/prompts/agents/` | Agent prompt files (30 agents) |
+| `.opencode/commands/` | Command templates (36 commands) |
+| `.opencode/skills/` | SKILL.md files loaded by the plugin |
+| `.opencode/plugins/openecc.js` | Bundled plugin output (git-tracked) |
+| `.openecc/` | Swarm plan state (index.json, plan YAMLs) — NOT gitignored |
+| `.plan/` | Local plan workspace — gitignored |
 
----
+## How the plugin works
 
-## Security Guidelines
+1. On session start, `src/plugin.ts:404` transforms system prompt, injecting soul principles, delegation rules, project profile, and plan state.
+2. It patches tool definitions (`src/plugin.ts:344`) to add enforcement banners on `edit`/`write`/`bash`/`glob`/`grep` — these are DO NOT CALL IN MAIN CONTEXT warnings.
+3. At `src/plugin.ts:356`, it registers agents (from `.opencode/prompts/agents/`), commands (from `.opencode/commands/`), and skills (from `.opencode/skills/`).
+4. On first user message (`src/plugin.ts:465`), it auto-analyzes the task and may inject a matched skill into the user's first message.
+5. On session idle (`src/plugin.ts:571`), it audits edited files for leftover `console.log` statements.
+6. AGENTS.md is pushed into `config.instructions` at `src/plugin.ts:364` — changes take effect on next session.
 
-### Mandatory Security Checks (Before Any Commit)
-- No hardcoded secrets (API keys, passwords, tokens)
-- All user inputs validated
-- SQL injection prevention (parameterized queries)
-- XSS prevention (sanitized HTML)
-- CSRF protection enabled
-- Authentication/authorization verified
-- Rate limiting on all endpoints
-- Error messages don't leak sensitive data
+## Key Constraints
 
-### Secret Management
-```typescript
-// NEVER: Hardcoded secrets
-const apiKey = "sk-proj-xxxxx"
+- **Cache clear** to force reinstall: `Remove-Item "$env:USERPROFILE\.cache\opencode\packages\openecc@git+https_*" -Recurse -Force`
+- **bun.lock** is the lockfile; `bun run bundle` is the only build command
+- Plugin is installed via `opencode.json` plugin entry — not run standalone
+- `.openecc/index.json` is the single source of truth for swarm plan state
+- The soul skill (`.opencode/skills/soul/SKILL.md`) is always auto-loaded — do not load it manually
 
-// ALWAYS: Environment variables
-const apiKey = process.env.OPENAI_API_KEY
-if (!apiKey) throw new Error("OPENAI_API_KEY not configured")
+## Install (for users)
+
+```json
+{ "plugin": ["openecc@git+https://github.com/nathwn12/OpenECC.git"] }
 ```
-
-### Security Response Protocol
-If security issue found:
-1. STOP immediately
-2. Use **security-reviewer** agent or `/security` command
-3. Fix CRITICAL issues before continuing
-4. Rotate any exposed secrets
-5. Review entire codebase for similar issues
-
----
-
-## Coding Standards
-
-### Immutability
-ALWAYS create new objects, NEVER mutate:
-```javascript
-// WRONG: Mutation
-function updateUser(user, name) { user.name = name; return user }
-
-// CORRECT: Immutability
-function updateUser(user, name) { return { ...user, name } }
-```
-
-### File Organization
-- MANY SMALL FILES > FEW LARGE FILES
-- High cohesion, low coupling
-- 200-400 lines typical, 800 max
-- Extract utilities from large components
-- Organize by feature/domain, not by type
-
-### Error Handling
-ALWAYS handle errors comprehensively:
-```typescript
-try {
-  const result = await riskyOperation()
-  return result
-} catch (error) {
-  console.error("Operation failed:", error)
-  throw new Error("Detailed user-friendly message")
-}
-```
-
-### Code Quality Checklist
-Before marking work complete:
-- Code is readable and well-named
-- Functions are small (<50 lines)
-- Files are focused (<800 lines)
-- No deep nesting (>4 levels)
-- Proper error handling
-- No console.log statements
-- No hardcoded values
-- No mutation (immutable patterns used)
-
-## Common Patterns
-
-### API Response Format
-```typescript
-interface ApiResponse<T> {
-  success: boolean
-  data?: T
-  error?: string
-  meta?: {
-    total: number
-    page: number
-    limit: number
-  }
-}
-```
-
-### Custom Hooks Pattern
-```typescript
-export function useDebounce<T>(value: T, delay: number): T {
-  const [debouncedValue, setDebouncedValue] = useState<T>(value)
-  useEffect(() => {
-    const handler = setTimeout(() => setDebouncedValue(value), delay)
-    return () => clearTimeout(handler)
-  }, [value, delay])
-  return debouncedValue
-}
-```
-
-### Repository Pattern
-```typescript
-interface Repository<T> {
-  findAll(filters?: Filters): Promise<T[]>
-  findById(id: string): Promise<T | null>
-  create(data: CreateDto): Promise<T>
-  update(id: string, data: UpdateDto): Promise<T>
-  delete(id: string): Promise<void>
-}
-```
-
----
-
-## Testing Requirements
-
-### Target: 80%+ Coverage
-
-Test Types (ALL required):
-1. **Unit Tests** — Individual functions, utilities, components
-2. **Integration Tests** — API endpoints, database operations
-3. **E2E Tests** — Critical user flows (Playwright)
-
-### TDD Workflow (MANDATORY)
-1. Write test first (RED)
-2. Run test — it should FAIL
-3. Write minimal implementation (GREEN)
-4. Run test — it should PASS
-5. Refactor (IMPROVE)
-6. Verify coverage (80%+)
-
----
-
-## Git Workflow
-
-### Commit Message Format
-```
-<type>: <description>
-
-<optional body>
-```
-Types: feat, fix, refactor, docs, test, chore, perf, ci
-
-### Pull Request Workflow
-1. Analyze full commit history (not just latest commit)
-2. Use `git diff [base-branch]...HEAD` to see all changes
-3. Draft comprehensive PR summary
-4. Include test plan with TODOs
-5. Push with `-u` flag if new branch
-
-### Feature Implementation Workflow
-1. **Top-Level Entrypoint** — Run `/swarm` for end-to-end orchestration with multi-axis review, approval gates, parallel build, and reflection. Plan state auto-injected into context from `.openecc/index.json`.
-2. **Plan** — Use planner agent or `/plan` command
-3. **TDD** — Use tdd-guide agent or `/tdd` command
-4. **Code Review** — Use code-reviewer agent or `/code-review` command
-5. **Security Review** — Use security-reviewer agent or `/security`
-6. **Quality Gate** — Run `/quality-gate` before committing
-
----
-
-## Available Agents
-
-| Agent | Purpose | When to Use |
-|-------|---------|-------------|
-| planner | Implementation planning | Complex features, refactoring |
-| architect | System design | Architectural decisions |
-| tdd-guide | Test-driven development | New features, bug fixes |
-| code-reviewer | Code quality and security review | After writing code |
-| security-reviewer | Security vulnerability analysis | Before commits |
-| build-error-resolver | Fix build errors | When build fails |
-| e2e-runner | E2E testing | Critical user flows |
-| refactor-cleaner | Dead code cleanup | Code maintenance |
-| doc-updater | Documentation | Updating docs |
-| docs-lookup | API reference research | Library documentation lookups |
-| database-reviewer | Database optimization | SQL, schema design |
-| go-reviewer | Go code review | Go projects |
-| go-build-resolver | Go build errors | Go build failures |
-| python-reviewer | Python code review | Python projects |
-| rust-reviewer | Rust code review | Rust projects |
-| rust-build-resolver | Rust build errors | Rust build failures |
-| java-reviewer | Java/Spring Boot review | Java projects |
-| java-build-resolver | Java build errors | Java build failures |
-| kotlin-reviewer | Kotlin/Android review | Kotlin projects |
-| kotlin-build-resolver | Kotlin build errors | Kotlin build failures |
-| cpp-reviewer | C++ code review | C++ projects |
-| cpp-build-resolver | C++ build errors | C++ build failures |
-| swarm-coordinator | End-to-end pipeline orchestration | Complex multi-step features requiring structured delivery |
-| plan-ceo-reviewer | Business/product review of plans | After planning before build |
-| plan-design-reviewer | UX/design review of plans | After planning before build |
-| plan-devex-reviewer | Developer experience review of plans | After planning before build |
-| plan-eng-reviewer | Architecture/engineering review of plans | After planning before build |
-| goal-evaluator | Goal completion evaluation | Checks if the /swarm goal is met from conversation context. Read-only, returns Met/Not Met/Partial |
-
-### Immediate Agent Usage
-No user prompt needed:
-1. Complex feature requests → Use **planner** agent + `/plan`
-2. Code just written/modified → Use **code-reviewer** agent + `/code-review`
-3. Bug fix or new feature → Use **tdd-guide** agent + `/tdd`
-4. Architectural decision → Use **architect** agent
-5. Security-sensitive code → Use **security-reviewer** agent + `/security`
-
-### Commands Available
-- `/plan` — Create implementation plan with risk assessment
-- `/tdd` — Enforce TDD workflow (RED → GREEN → REFACTOR)
-- `/code-review` — Review code changes
-- `/security` — Run security review
-- `/build-fix` — Fix build errors
-- `/e2e` — Generate E2E tests
-- `/refactor-clean` — Remove dead code
-- `/orchestrate` — Multi-agent workflow
-- `/verify` — Run full verification pipeline
-- `/swarm` — Execute full engineering pipeline with multi-axis review, approval gates, parallel build, and reflection
-- `/make` — Alias for /swarm
-- `/quality-gate` — Run quality pipeline: format, lint, type-check, test, security scan
-- `/harness-audit` — Audit harness configuration quality and consistency
-- `/loop-start` — Start autonomous agent loop for continuous improvement
-- `/loop-status` — Check autonomous loop progress and history
-- `/skill-create` — Generate an agent skill from git history patterns
-- `/instinct-status` — View learned instinct patterns
-- `/instinct-import` — Import instincts from external file
-- `/instinct-export` — Export instincts to portable file
-- `/evolve` — Cluster instincts into reusable skills
-- `/promote` — Promote project instincts to global scope
-- `/projects` — List known projects and instinct statistics
-
----
-
-## Delegation Enforcement (HARD RULES)
-
-These are NOT optional. Violations are bugs.
-
-### Tool Access Control
-OpenECC enforces tool-level delegation via system prompt injection and tool definition rewriting.
-
-**MAIN CONTEXT (TALK + DELEGATE only):**
-- `task` — spawn subagents for all discrete work
-- `skill` — discover and load domain skills
-- `todowrite` — track task progress
-- `question` — ask clarifying questions
-- `read`, `webfetch` — read-only context gathering (sparingly)
-
-**SUBAGENT CONTEXT ONLY (NEVER main context):**
-- `edit`, `write` — editing/creating source files (use `@builder`)
-- `bash` — running commands (use `@executor`)
-- `glob`, `grep` — searching the codebase (use `@explorer`)
-
-### Self-Audit Before Every Tool Call
-Before calling any tool, check:
-1. Does this tool modify files? → **Delegate via `task`**
-2. Does this tool run commands? → **Delegate via `task`**
-3. Does this tool search source code? → **Delegate via `task`**
-4. Am I doing work instead of delegating? → **STOP. Spawn a subagent.**
-
----
-
-## Available Tools
-
-| Tool | Purpose |
-|------|---------|
-| `run-tests` | Auto-detect PM + test framework, build test commands |
-| `changed-files` | List files modified in current session |
-| `git-summary` | Show branch, status, recent commits, staged/unstaged diffs |
-| `format-code` | Detect formatter and return format command |
-| `lint-check` | Detect linter and return lint command |
-| `security-audit` | Three-phase: dependency audit, secret scan, code anti-pattern check |
-| `analyze-task` | Classify a user message into a task category and extract keywords |
-| `auto-delegate` | Analyze a user message and recommend which subagent(s) and skill(s) to use |
-
-### Auto-Delegation Intelligence
-
-OpenECC includes an auto-delegation system that analyzes user messages and recommends the best subagent and skill for the task. It works by:
-
-1. **Task classification** — Categorizes input into planning, review, build-fix, test, docs, security, debug, refactor, or general
-2. **Project detection** — Scans the workspace for languages, frameworks, test tools, and config files
-3. **Agent/skill matching** — Scores agents and skills against task keywords and project profile
-4. **Confidence scoring** — Returns ranked recommendations with confidence scores
-
-The `auto-delegate` tool returns recommended agents and skills. The system also auto-injects project context (detected languages, frameworks, priority subagents) into the session at startup.
-
----
-
-## Clearing Cache
-
-To force a fresh install of OpenECC, delete its cached package directory:
-
-```powershell
-Remove-Item "$env:USERPROFILE\.cache\opencode\packages\openecc@git+https_\github.com\nathwn12" -Recurse -Force
-```
-
-Then restart OpenCode.
-
-## OpenCode-Specific Notes
-
-Since OpenCode does not support hooks, the following actions that were automated in Claude Code must be done manually:
-
-### After Writing/Editing Code
-- Run `prettier --write <file>` to format JS/TS files
-- Run `npx tsc --noEmit` to check for TypeScript errors
-- Check for console.log statements and remove them
-
-### Before Committing
-- Run security checks manually
-- Verify no secrets in code
-- Run full test suite

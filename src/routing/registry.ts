@@ -1,5 +1,6 @@
 import * as fs from "node:fs"
 import * as path from "node:path"
+import { type ProjectProfile } from "./detect"
 
 export interface AgentTrigger {
   domain: string
@@ -18,19 +19,6 @@ export interface ScoredRecommendation {
   type: "agent" | "skill"
   confidence: number
   domain: string
-}
-
-interface ProjectProfile {
-  languages: string[]
-  frameworks: string[]
-  testFrameworks: string[]
-  cssFrameworks: string[]
-  packageManager: string
-  formatter: string | null
-  linter: string | null
-  hasDocker: boolean
-  hasCI: boolean
-  projectName: string
 }
 
 const AGENT_TRIGGERS: Record<string, AgentTrigger> = {

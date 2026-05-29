@@ -62,14 +62,6 @@ function detectTestFrameworks(cwd) {
     frameworks.push("go test");
   return frameworks;
 }
-function detectCSSFrameworks(cwd) {
-  const frameworks = [];
-  if (hasFile(cwd, "tailwind.config.js", "tailwind.config.ts"))
-    frameworks.push("tailwind");
-  if (hasFile(cwd, "postcss.config.js", "postcss.config.mjs"))
-    frameworks.push("postcss");
-  return frameworks;
-}
 function detectDocker(cwd) {
   return hasFile(cwd, "Dockerfile", "docker-compose.yml", "docker-compose.yaml");
 }
@@ -132,7 +124,6 @@ function detectProject(cwd) {
     languages: detectLanguages(cwd),
     frameworks: detectFrameworks(cwd),
     testFrameworks: detectTestFrameworks(cwd),
-    cssFrameworks: detectCSSFrameworks(cwd),
     packageManager: detectPackageManager(cwd),
     formatter: detectFormatter(cwd),
     linter: detectLinter(cwd),
