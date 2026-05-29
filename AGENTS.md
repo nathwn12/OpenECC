@@ -223,7 +223,7 @@ Types: feat, fix, refactor, docs, test, chore, perf, ci
 | plan-design-reviewer | UX/design review of plans | After planning before build |
 | plan-devex-reviewer | Developer experience review of plans | After planning before build |
 | plan-eng-reviewer | Architecture/engineering review of plans | After planning before build |
-| goal-evaluator | Goal completion evaluation | Checks if the /swarm goal is met from conversation context | Read-only, returns Met/Not Met/Partial |
+| goal-evaluator | Goal completion evaluation | Checks if the /swarm goal is met from conversation context. Read-only, returns Met/Not Met/Partial |
 
 ### Immediate Agent Usage
 No user prompt needed:
@@ -245,8 +245,17 @@ No user prompt needed:
 - `/verify` — Run full verification pipeline
 - `/swarm` — Execute full engineering pipeline with multi-axis review, approval gates, parallel build, and reflection
 - `/make` — Alias for /swarm
-
----
+- `/quality-gate` — Run quality pipeline: format, lint, type-check, test, security scan
+- `/harness-audit` — Audit harness configuration quality and consistency
+- `/loop-start` — Start autonomous agent loop for continuous improvement
+- `/loop-status` — Check autonomous loop progress and history
+- `/skill-create` — Generate an agent skill from git history patterns
+- `/instinct-status` — View learned instinct patterns
+- `/instinct-import` — Import instincts from external file
+- `/instinct-export` — Export instincts to portable file
+- `/evolve` — Cluster instincts into reusable skills
+- `/promote` — Promote project instincts to global scope
+- `/projects` — List known projects and instinct statistics
 
 ---
 

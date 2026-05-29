@@ -1,9 +1,9 @@
 // @bun
 // src/plugin.ts
 import { tool } from "@opencode-ai/plugin";
-import * as path3 from "path";
+import * as path4 from "path";
 import { fileURLToPath } from "url";
-import * as fs3 from "fs";
+import * as fs4 from "fs";
 import { execSync } from "child_process";
 
 // src/routing/detect.ts
@@ -169,7 +169,13 @@ var AGENT_TRIGGERS = {
   "java-build-resolver": { domain: "build-fix", keywords: ["java", "maven", "gradle", "java build", "java compilation"], permissions: { task: "deny" } },
   "kotlin-reviewer": { domain: "review", keywords: ["kotlin", "android", "kotlin code", "kotlin review"], permissions: { edit: "deny", write: "deny", task: "deny" } },
   "kotlin-build-resolver": { domain: "build-fix", keywords: ["kotlin", "android", "kotlin build", "gradle", "kotlin compilation"], permissions: { task: "deny" } },
-  "database-reviewer": { domain: "review", keywords: ["database", "sql", "postgresql", "supabase", "query", "schema", "migration", "rls", "row level security"], permissions: { task: "deny" } }
+  "database-reviewer": { domain: "review", keywords: ["database", "sql", "postgresql", "supabase", "query", "schema", "migration", "rls", "row level security"], permissions: { task: "deny" } },
+  "swarm-coordinator": { domain: "orchestration", keywords: ["swarm", "pipeline", "end-to-end", "full workflow", "build pipeline", "ci pipeline", "make"], permissions: { edit: "deny", write: "deny" } },
+  "plan-ceo-reviewer": { domain: "review", keywords: ["ceo review", "business review", "scope review", "product review", "value assessment"], permissions: { edit: "deny", write: "deny", task: "deny" } },
+  "plan-design-reviewer": { domain: "review", keywords: ["design review", "ux review", "api design review", "interface review"], permissions: { edit: "deny", write: "deny", task: "deny" } },
+  "plan-devex-reviewer": { domain: "review", keywords: ["devex review", "developer experience", "developer workflow", "friction review"], permissions: { edit: "deny", write: "deny", task: "deny" } },
+  "plan-eng-reviewer": { domain: "review", keywords: ["engineering review", "architecture review", "technical review", "code review plan"], permissions: { edit: "deny", write: "deny", task: "deny" } },
+  "goal-evaluator": { domain: "evaluation", keywords: ["goal", "evaluate", "completion", "done check", "condition met", "acceptance criteria"], permissions: { edit: "deny", write: "deny", task: "deny", bash: "deny", glob: "deny", grep: "deny" } }
 };
 function buildAgentRegistry() {
   return { ...AGENT_TRIGGERS };
@@ -292,7 +298,7 @@ function matchTriggers(input, projectProfile, agentRegistry, skillRegistry) {
 
 // src/routing/classifier.ts
 var PATTERNS = {
-  planning: [/^(plan|design|architecture|how should|what's the best|think about|strategy)/i],
+  planning: [/^(plan|design|architecture|how should|what's the best|think about|strategy)/i, /\/swarm/i, /\/make/i, /full pipeline/i, /end to end/i, /build and ship/i, /pipeline/i],
   review: [/(review|check|audit|look over|inspect)/i],
   "build-fix": [/(build error|compilation error|type error|doesn't compile|fails to build|build fail)/i],
   test: [/(test|spec|coverage|tdd|unit test|integration test)/i],
@@ -354,6 +360,18 @@ function autoDelegate(input, projectProfile, agentRegistry, skillRegistry) {
     confidence: Math.round(m.confidence * 100) / 100,
     reason: `Matched task keywords: ${m.domain}`
   }));
+  const SWARM_TRIGGERS = ["/swarm", "/make", "full pipeline", "pipeline", "end to end", "build and ship", "build & ship"];
+  const isSwarm = SWARM_TRIGGERS.some((k) => input.toLowerCase().includes(k));
+  if (isSwarm) {
+    recommendedAgents.unshift({
+      name: "swarm-coordinator",
+      confidence: 0.9,
+      reason: "Swarm/multi-step pipeline coordination"
+    });
+    if (analysis.category === "general") {
+      analysis.category = "planning";
+    }
+  }
   let confidence = 0.5;
   if (analysis.category !== "general")
     confidence = 0.7;
@@ -364,6 +382,9 @@ function autoDelegate(input, projectProfile, agentRegistry, skillRegistry) {
     reasoning += ` (sub: ${analysis.subCategories.join(", ")})`;
   }
   reasoning += `. Found ${recommendedAgents.length} agent(s) and ${recommendedSkills.length} skill(s).`;
+  if (isSwarm) {
+    reasoning += ` Swarm pipeline detected \u2014 routed to swarm-coordinator.`;
+  }
   if (projectProfile) {
     reasoning += ` Project: ${projectProfile.projectName} (${projectProfile.languages.join(", ") || "unknown"})`;
   }
@@ -389,12 +410,7 @@ function domainReason(domain) {
   return reasons[domain] || `Task domain: ${domain}`;
 }
 
-// src/plugin.ts
-var __dirname2 = path3.dirname(fileURLToPath(import.meta.url));
-var skillsDir = path3.resolve(__dirname2, "..", "skills");
-var agentsDir = path3.resolve(__dirname2, "..", "prompts", "agents");
-var commandsDir = path3.resolve(__dirname2, "..", "commands");
-var agentsMDPath = path3.resolve(__dirname2, "..", "..", "AGENTS.md");
+// src/constants.ts
 var DELEGATION_ENFORCEMENT = `## OpenECC Delegation Enforcement (HARD RULES)
 
 These are structural constraints, NOT suggestions. Violations are bugs.
@@ -462,41 +478,40 @@ Your primary job is to delegate, synthesize, and verify \u2014 not to do work di
 2. **Synthesize** \u2014 distill subagent results into 3-5 sentences max
 3. **Signature** \u2014 end with \`---\` and a brief status summary`;
 var QUICK_ROUTING = `### Quick Routing
-Task \\u2192 Subagent:
-  plan/architect   \\u2192 @planner
-  code review      \\u2192 @code-reviewer
-  security         \\u2192 @security-reviewer
-  build/type error \\u2192 @build-error-resolver
-  test-first/TDD   \\u2192 @tdd-guide
-  docs             \\u2192 @doc-updater / @docs-lookup
-  cleanup/refactor \\u2192 @refactor-cleaner
-  debug            \\u2192 @build-error-resolver
-  e2e              \\u2192 @e2e-runner
-  language-specific \\u2192 <lang>-reviewer / <lang>-build-resolver
-  complex multi    \\u2192 @planner (orchestrate)
+Task \u2192 Subagent:
+  plan/architect   \u2192 @planner
+  code review      \u2192 @code-reviewer
+  security         \u2192 @security-reviewer
+  build/type error \u2192 @build-error-resolver
+  test-first/TDD   \u2192 @tdd-guide
+  docs             \u2192 @doc-updater / @docs-lookup
+  cleanup/refactor \u2192 @refactor-cleaner
+  debug            \u2192 @build-error-resolver
+  e2e              \u2192 @e2e-runner
+  language-specific \u2192 <lang>-reviewer / <lang>-build-resolver
+  complex multi    \u2192 @planner (orchestrate)
 
-Skill \\u2192 Task:
-  api-design          \\u2192 API routes, resources, pagination
-  backend-patterns    \\u2192 Node.js, Express, Next.js API
-  frontend-patterns   \\u2192 React, Next.js, state, UI
-  tdd-workflow        \\u2192 red-green-refactor, 80% coverage
-  e2e-testing         \\u2192 Playwright, Page Object Model
-  security-review     \\u2192 auth, input validation, secrets
-  coding-standards    \\u2192 naming, immutability, quality
-  verification-loop   \\u2192 build, types, lint, test, security
-  strategic-compact   \\u2192 context compaction strategy
-  api-security        \\u2192 authZ, rate limiting, OWASP`;
+Skill \u2192 Task:
+  api-design          \u2192 API routes, resources, pagination
+  backend-patterns    \u2192 Node.js, Express, Next.js API
+  frontend-patterns   \u2192 React, Next.js, state, UI
+  tdd-workflow        \u2192 red-green-refactor, 80% coverage
+  e2e-testing         \u2192 Playwright, Page Object Model
+  security-review     \u2192 auth, input validation, secrets
+  coding-standards    \u2192 naming, immutability, quality
+  verification-loop   \u2192 build, types, lint, test, security
+  strategic-compact   \u2192 context compaction strategy
+  api-security        \u2192 authZ, rate limiting, OWASP`;
 var COMPLETION_CONTRACT = `### Before responding
 1. Did you delegate analysis/planning work to a subagent when appropriate?
 2. Did you verify results (not assume)?
 3. Is the response concise and synthesized?
 
-When done: place \`---\` followed by \`**Status:** \\u2705 Done | \\u1f6a7 Blocked | \\ud83d\\udd04 In Progress\``;
-var _projectProfile = null;
-var _skillRegistryCache = null;
-var _delegationDepth = 0;
-var _ignoredRecommendations = 0;
-var _capturedResults = new Map;
+When done: place \`---\` followed by \`**Status:** \u2705 Done | \u1F6A7 Blocked | \uD83D\uDD04 In Progress\``;
+
+// src/utils.ts
+import * as fs3 from "fs";
+import * as path3 from "path";
 function buildProjectProfileSection(p) {
   const lines = [];
   lines.push("### Project Profile (auto-detected)");
@@ -611,6 +626,17 @@ function detectLinter2(cwd) {
     return "clippy";
   return null;
 }
+
+// src/plugin.ts
+var __dirname2 = path4.dirname(fileURLToPath(import.meta.url));
+var skillsDir = path4.resolve(__dirname2, "..", "skills");
+var agentsDir = path4.resolve(__dirname2, "..", "prompts", "agents");
+var commandsDir = path4.resolve(__dirname2, "..", "commands");
+var agentsMDPath = path4.resolve(__dirname2, "..", "..", "AGENTS.md");
+var _projectProfile = null;
+var _skillRegistryCache = null;
+var _delegationDepth = 0;
+var _capturedResults = new Map;
 var editedFiles = new Set;
 var runTestsTool = tool({
   description: "Run the test suite with optional coverage, watch mode, or specific test patterns. Automatically detects package manager (npm, pnpm, yarn, bun) and test framework.",
@@ -762,7 +788,7 @@ var securityAuditTool = tool({
     const commands = [];
     report.push("# Security Audit Report");
     report.push("");
-    const hasPackageJson = fs3.existsSync(path3.join(cwd, "package.json"));
+    const hasPackageJson = fs4.existsSync(path4.join(cwd, "package.json"));
     if (hasPackageJson) {
       report.push("## Phase 1: Dependency Audit");
       report.push("Run: `npm audit` to check for vulnerable dependencies");
@@ -771,12 +797,12 @@ var securityAuditTool = tool({
     }
     report.push("## Phase 2: Secret Scanning");
     report.push("Run the following to scan for hardcoded secrets:");
-    commands.push('grep -rn "api[_-]\\?key\\|sk-[A-Za-z0-9]\\|ghp_\\|gho_\\|ghu_\\|xox[abp]\\|AKIA[0-9A-Z]\\|-----BEGIN RSA PRIVATE KEY-----" --include="*.{ts,js,py,rs,go,java}" --exclude-dir=node_modules --exclude-dir=.git . 2>/dev/null | grep -v "node_modules" | head -30');
+    commands.push('Select-String -Pattern "api[_-]?key|sk-[A-Za-z0-9]|ghp_|gho_|ghu_|xox[abp]|AKIA[0-9A-Z]|-----BEGIN RSA PRIVATE KEY-----" -Path @(Get-ChildItem -Recurse -Include "*.ts","*.js","*.py","*.rs","*.go","*.java" -Exclude "*node_modules*") | Select-Object -First 30');
     report.push("");
     report.push("## Phase 3: Anti-Pattern Detection");
     report.push("Run the following to detect dangerous patterns:");
-    commands.push('grep -rn "eval(\\|innerHTML\\|dangerouslySetInnerHTML\\|execSync\\|child_process\\|fromCharCode\\|document.write\\|new Function(" --include="*.{ts,tsx,js,jsx}" --exclude-dir=node_modules . 2>/dev/null | head -20');
-    commands.push('grep -rn "${.*\\(req\\.query\\|req\\.body\\|req\\.params\\)" --include="*.{ts,js}" --exclude-dir=node_modules . 2>/dev/null | head -10');
+    commands.push('Select-String -Pattern "eval(|innerHTML|dangerouslySetInnerHTML|execSync|child_process|fromCharCode|document.write|new Function(" -Path @(Get-ChildItem -Recurse -Include "*.ts","*.tsx","*.js","*.jsx" -Exclude "*node_modules*") | Select-Object -First 20');
+    commands.push("Get-ChildItem -Recurse -Include '*.ts','*.js' -Exclude '*node_modules*' | Select-String -Pattern 'req\\.(query|body|params)' | Select-Object -First 10");
     report.push("");
     report.push("## Commands to Run");
     commands.forEach((c) => report.push(`- \`${c}\``));
@@ -853,7 +879,13 @@ var OpenECCPlugin = async ({ client, directory, $, worktree }) => {
     { name: "java-build-resolver", desc: "Java/Maven/Gradle build error resolution specialist. Use when Java build or tests fail. Fixes with minimal changes. Trigger: when Java compilation, Maven, or Gradle errors occur.", permission: { task: "deny" } },
     { name: "kotlin-reviewer", desc: "Kotlin and Android reviewer specializing in coroutines, Jetpack Compose, and idiomatic patterns. Use after writing Kotlin/Android code. Trigger: when Kotlin or Android code has been written or modified.", permission: { edit: "deny", write: "deny", task: "deny" } },
     { name: "kotlin-build-resolver", desc: "Kotlin/Gradle build error resolution specialist. Use when Kotlin or Gradle builds fail. Fixes with minimal changes. Trigger: when Kotlin compilation or Gradle configuration errors occur.", permission: { task: "deny" } },
-    { name: "database-reviewer", desc: "PostgreSQL and Supabase database specialist for query optimization, schema design, and security. Use after writing database queries, migrations, or RLS policies. Trigger: when SQL queries, schema changes, or RLS policies need review.", permission: { task: "deny" } }
+    { name: "database-reviewer", desc: "PostgreSQL and Supabase database specialist for query optimization, schema design, and security. Use after writing database queries, migrations, or RLS policies. Trigger: when SQL queries, schema changes, or RLS policies need review.", permission: { task: "deny" } },
+    { name: "swarm-coordinator", desc: "Orchestrates full engineering pipeline: think \u2192 plan \u2192 review \u2192 build \u2192 test \u2192 ship \u2192 reflect. Spawns and coordinates multiple subagents in parallel. Hard max 5 live subagents. Use for end-to-end feature delivery. Trigger: when a complete engineering pipeline is needed from ideation to ship.", permission: { edit: "deny", write: "deny" } },
+    { name: "plan-ceo-reviewer", desc: "Reviews implementation plans from business/product perspective. Returns structured feedback: Block (critical issue), Warn (risky), Suggest (improvement), Questions (clarifications needed). Use when a plan needs business viability or product alignment review. Trigger: when a plan has been created and needs business/product review.", permission: { edit: "deny", write: "deny", task: "deny" } },
+    { name: "plan-design-reviewer", desc: "Reviews implementation plans from UX/design perspective. Returns structured feedback: Block (critical issue), Warn (risky), Suggest (improvement), Questions (clarifications needed). Use when a plan needs UX or design review. Trigger: when a plan has been created and needs design review.", permission: { edit: "deny", write: "deny", task: "deny" } },
+    { name: "plan-devex-reviewer", desc: "Reviews implementation plans from developer experience perspective. Returns structured feedback: Block (critical issue), Warn (risky), Suggest (improvement), Questions (clarifications needed). Use when a plan needs DX/API ergonomics review. Trigger: when a plan has been created and needs developer experience review.", permission: { edit: "deny", write: "deny", task: "deny" } },
+    { name: "plan-eng-reviewer", desc: "Reviews implementation plans from engineering/architecture perspective. Returns structured feedback: Block (critical issue), Warn (risky), Suggest (improvement), Questions (clarifications needed). Use when a plan needs technical architecture or engineering review. Trigger: when a plan has been created and needs engineering review.", permission: { edit: "deny", write: "deny", task: "deny" } },
+    { name: "goal-evaluator", desc: "Evaluates whether a swarm session goal has been met based on conversation context. Read-only: does not run commands or read files. Returns Met | Not Met | Partial with evidence and recommendations. Use as the completion gate in the /swarm pipeline. Trigger: after build and review phases to determine if the goal condition is satisfied.", permission: { edit: "deny", write: "deny", bash: "deny", glob: "deny", grep: "deny", task: "deny" } }
   ];
   const commands = [
     { name: "plan", desc: "Create a detailed implementation plan for complex features or refactoring", agent: "planner", subtask: true },
@@ -889,7 +921,9 @@ var OpenECCPlugin = async ({ client, directory, $, worktree }) => {
     { name: "instinct-export", desc: "Export instincts to a file" },
     { name: "evolve", desc: "Cluster instincts into reusable skills" },
     { name: "promote", desc: "Promote project instincts to global scope" },
-    { name: "projects", desc: "List known projects and instinct statistics" }
+    { name: "projects", desc: "List known projects and instinct statistics" },
+    { name: "swarm", desc: "Execute full engineering pipeline: think \u2192 plan \u2192 review \u2192 build \u2192 test \u2192 evaluate \u2192 ship \u2192 reflect. Coordinates multiple subagents via the swarm-coordinator. The /swarm argument IS the goal condition, evaluated by goal-evaluator before shipping.", agent: "swarm-coordinator", subtask: true },
+    { name: "make", desc: "Alias for /swarm. Execute full engineering pipeline end-to-end.", agent: "swarm-coordinator", subtask: true }
   ];
   return {
     "tool.definition": async (input, output) => {
@@ -917,7 +951,7 @@ var OpenECCPlugin = async ({ client, directory, $, worktree }) => {
       config.agent = config.agent || {};
       for (const agent of agents) {
         if (!config.agent[agent.name]) {
-          const prompt = readFileSafe(path3.join(agentsDir, `${agent.name}.txt`));
+          const prompt = readFileSafe(path4.join(agentsDir, `${agent.name}.txt`));
           if (prompt) {
             const agentConfig = {
               description: agent.desc,
@@ -934,7 +968,7 @@ var OpenECCPlugin = async ({ client, directory, $, worktree }) => {
       config.command = config.command || {};
       for (const cmd of commands) {
         if (!config.command[cmd.name]) {
-          const templateContent = readFileSafe(path3.join(commandsDir, `${cmd.name}.md`));
+          const templateContent = readFileSafe(path4.join(commandsDir, `${cmd.name}.md`));
           const cleanTemplate = stripYamlFrontmatter(templateContent);
           if (cleanTemplate) {
             config.command[cmd.name] = {
@@ -953,7 +987,7 @@ $ARGUMENTS`,
       if (!_projectProfile) {
         _projectProfile = detectProject(worktreePath);
       }
-      const soulPath = path3.join(skillsDir, "soul", "SKILL.md");
+      const soulPath = path4.join(skillsDir, "soul", "SKILL.md");
       const soulContent = readFileSafe(soulPath);
       const cleanSoul = soulContent.replace(/^---[\s\S]*?---\n/, "");
       const systemBootstrap = `<EXTREMELY_IMPORTANT>
@@ -978,6 +1012,31 @@ ${buildProjectProfileSection(_projectProfile)}`;
         systemMessages.unshift({ type: "text", text: systemBootstrap });
         output.systemMessages = systemMessages;
       }
+      try {
+        const openeccDir = path4.join(worktreePath, ".openecc");
+        const indexJsonPath = path4.join(openeccDir, "index.json");
+        if (!fs4.existsSync(openeccDir))
+          fs4.mkdirSync(openeccDir, { recursive: true });
+        if (!fs4.existsSync(indexJsonPath)) {
+          fs4.writeFileSync(indexJsonPath, JSON.stringify({ nextId: 1, activePlanId: null, plans: [] }, null, 2));
+        }
+        const indexData = JSON.parse(fs4.readFileSync(indexJsonPath, "utf8"));
+        const activeId = indexData.activePlanId;
+        const activePlan = indexData.plans?.find((p) => p.id === activeId);
+        if (activePlan) {
+          const planBlock = `<structured type="plan_state">
+active_plan: ${activePlan.id}
+status: ${activePlan.status || "unknown"}
+done: ${activePlan.done ?? 0}
+total: ${activePlan.total ?? 0}
+goal: ${activePlan.summary || ""}
+</structured>`;
+          if (!systemMessages.some((p) => p.text?.includes("plan_state"))) {
+            systemMessages.push({ type: "text", text: planBlock });
+            output.systemMessages = systemMessages;
+          }
+        }
+      } catch {}
     },
     "experimental.chat.messages.transform": async (_input, output) => {
       if (!output.messages?.length)
@@ -1009,7 +1068,7 @@ ${buildProjectProfileSection(_projectProfile)}`;
       const topSkill = matchResults[0];
       if (!topSkill || topSkill.confidence < 0.7)
         return;
-      const skillPath = path3.join(skillsDir, topSkill.name, "SKILL.md");
+      const skillPath = path4.join(skillsDir, topSkill.name, "SKILL.md");
       const skillContent = readFileSafe(skillPath);
       const cleanContent = stripYamlFrontmatter(skillContent);
       if (!cleanContent)
@@ -1066,15 +1125,14 @@ ${cleanContent.slice(0, 3000)}
       editedFiles.add(event.path);
       if (event.path.match(/\.(ts|tsx|js|jsx)$/)) {
         try {
-          const result = await $`grep -n "console\\.log" ${event.path} 2>/dev/null`.text();
-          if (result.trim()) {
-            const lines = result.trim().split(`
-`).length;
+          const content = fs4.readFileSync(event.path, "utf-8");
+          const matches = content.match(/console\.log/g);
+          if (matches) {
             await client.app.log({
               body: {
                 service: "openecc",
                 level: "warn",
-                message: `console.log found in ${event.path} (${lines} occurrence${lines > 1 ? "s" : ""})`
+                message: `console.log found in ${event.path} (${matches.length} occurrence${matches.length > 1 ? "s" : ""})`
               }
             });
           }
@@ -1089,9 +1147,6 @@ ${cleanContent.slice(0, 3000)}
     },
     "session.idle": async () => {
       _delegationDepth = 0;
-      if (_ignoredRecommendations >= 3) {
-        _ignoredRecommendations = 0;
-      }
       if (editedFiles.size === 0)
         return;
       let count = 0;
@@ -1100,8 +1155,9 @@ ${cleanContent.slice(0, 3000)}
         if (!file.match(/\.(ts|tsx|js|jsx)$/))
           continue;
         try {
-          const result = await $`grep -c "console\\.log" ${file} 2>/dev/null`.text();
-          const n = parseInt(result.trim(), 10);
+          const content = fs4.readFileSync(file, "utf-8");
+          const matches = content.match(/console\.log/g);
+          const n = matches ? matches.length : 0;
           if (n > 0) {
             count += n;
             files.push(file);

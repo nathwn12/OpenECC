@@ -6,6 +6,8 @@ import { execSync } from "node:child_process"
 import { detectProject, type ProjectProfile } from "./routing/detect"
 import { buildAgentRegistry, buildSkillRegistry } from "./routing/registry"
 import { autoDelegate as autoDelegateFn, analyzeTask as analyzeTaskFn } from "./routing/classifier"
+import { DELEGATION_ENFORCEMENT, TOOL_ACCESS_BLOCK, DELEGATOR_ROLE, QUICK_ROUTING, COMPLETION_CONTRACT } from "./constants"
+import { buildProjectProfileSection, readFileSafe, resolveProjectFile, stripYamlFrontmatter, detectPackageManager, detectFormatter, detectLinter } from "./utils"
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const skillsDir = path.resolve(__dirname, "..", "skills")
@@ -13,216 +15,10 @@ const agentsDir = path.resolve(__dirname, "..", "prompts", "agents")
 const commandsDir = path.resolve(__dirname, "..", "commands")
 const agentsMDPath = path.resolve(__dirname, "..", "..", "AGENTS.md")
 
-const DELEGATION_ENFORCEMENT = `## OpenECC Delegation Enforcement (HARD RULES)
-
-These are structural constraints, NOT suggestions. Violations are bugs.
-
-### Tool Access Control — Main Context (TALK + DELEGATE only)
-NEVER call these tools in main context. They must go through subagents:
-
-| Tool | Correct Usage | Delegate To |
-|------|--------------|-------------|
-| \`edit\` | Changes source files | @builder or language-specific subagent |
-| \`write\` | Creates/modifies files | @builder or language-specific subagent |
-| \`bash\` | Runs commands | @executor or language-specific subagent |
-| \`glob\` | Searches codebase | @explorer or task-specific subagent |
-| \`grep\` | Searches file contents | @explorer or task-specific subagent |
-
-### Self-Audit Before Every Tool Call
-Before calling ANY tool, ask:
-1. "Does this tool edit, write, or run commands?" → DELEGATE via \`task\` tool.
-2. "Does this tool search source code?" → DELEGATE via \`task\` tool.
-3. "Could a subagent do this in parallel while I handle something else?" → DELEGATE via \`task\` tool.
-4. "Am I about to do work directly instead of delegating?" → STOP. Spawn a subagent.
-
-If any answer is YES, use the \`task\` tool to spawn a subagent. No exceptions.`
-
-const TOOL_ACCESS_BLOCK = `<structured type="tool_access">
-type: tool_access
-rule: Main context is TALK + DELEGATE only. Tools are partitioned by context.
-main_context_only:
-  allowed: [task, skill, todowrite, question, read, webfetch]
-  description: "Spawn subagents, load skills, track todos, gather context. NO source mutations."
-subagent_only:
-  allowed: [edit, write, bash, glob, grep]
-  description: "All source code work. NEVER called in main context."
-</structured>`
-
-const DELEGATOR_ROLE = `## Your Role (OpenECC Delegator)
-
-Your primary job is to delegate, synthesize, and verify — not to do work directly.
-
-### When to delegate to a subagent (@mention):
-- Planning / architecture → @planner
-- Code review / quality → @code-reviewer
-- Security review → @security-reviewer
-- Build/type errors → @build-error-resolver
-- Test-first development → @tdd-guide
-- E2E tests → @e2e-runner
-- Documentation → @doc-updater / @docs-lookup
-- Dead code cleanup → @refactor-cleaner
-- Language-specific (Go/Rust/C++/Java/Kotlin/Python) → respective reviewer
-- Complex multi-step tasks → @planner (orchestrate mode)
-
-### When to load a skill:
-- API design → skill tool → api-design
-- Backend patterns → skill tool → backend-patterns
-- Frontend patterns → skill tool → frontend-patterns
-- Testing patterns → skill tool → tdd-workflow / e2e-testing
-- Security review → skill tool → security-review
-
-### When to answer directly:
-- Simple factual questions
-- Quick clarifications ("what is X?")
-- Status checks
-- Anything that requires zero tools
-
-### Completion protocol:
-1. **Verify before claiming** — run the command, read the output, then speak
-2. **Synthesize** — distill subagent results into 3-5 sentences max
-3. **Signature** — end with \`---\` and a brief status summary`
-
-const QUICK_ROUTING = `### Quick Routing
-Task \\u2192 Subagent:
-  plan/architect   \\u2192 @planner
-  code review      \\u2192 @code-reviewer
-  security         \\u2192 @security-reviewer
-  build/type error \\u2192 @build-error-resolver
-  test-first/TDD   \\u2192 @tdd-guide
-  docs             \\u2192 @doc-updater / @docs-lookup
-  cleanup/refactor \\u2192 @refactor-cleaner
-  debug            \\u2192 @build-error-resolver
-  e2e              \\u2192 @e2e-runner
-  language-specific \\u2192 <lang>-reviewer / <lang>-build-resolver
-  complex multi    \\u2192 @planner (orchestrate)
-
-Skill \\u2192 Task:
-  api-design          \\u2192 API routes, resources, pagination
-  backend-patterns    \\u2192 Node.js, Express, Next.js API
-  frontend-patterns   \\u2192 React, Next.js, state, UI
-  tdd-workflow        \\u2192 red-green-refactor, 80% coverage
-  e2e-testing         \\u2192 Playwright, Page Object Model
-  security-review     \\u2192 auth, input validation, secrets
-  coding-standards    \\u2192 naming, immutability, quality
-  verification-loop   \\u2192 build, types, lint, test, security
-  strategic-compact   \\u2192 context compaction strategy
-  api-security        \\u2192 authZ, rate limiting, OWASP`
-
-const COMPLETION_CONTRACT = `### Before responding
-1. Did you delegate analysis/planning work to a subagent when appropriate?
-2. Did you verify results (not assume)?
-3. Is the response concise and synthesized?
-
-When done: place \`---\` followed by \`**Status:** \\u2705 Done | \\u1f6a7 Blocked | \\ud83d\\udd04 In Progress\``
-
 let _projectProfile: ProjectProfile | null = null
 let _skillRegistryCache: ReturnType<typeof buildSkillRegistry> | null = null
 let _delegationDepth = 0
 const _capturedResults = new Map<string, any>()
-
-function buildProjectProfileSection(p: ProjectProfile): string {
-  const lines: string[] = []
-  lines.push("### Project Profile (auto-detected)")
-  if (p.languages.length > 0) lines.push(`- Languages: ${p.languages.join(", ")}`)
-  if (p.frameworks.length > 0) lines.push(`- Frameworks: ${p.frameworks.join(", ")}`)
-  if (p.testFrameworks.length > 0) lines.push(`- Test tools: ${p.testFrameworks.join(", ")}`)
-  lines.push(`- Package manager: ${p.packageManager}`)
-  lines.push("")
-
-  const subagentLines: string[] = []
-  const langAgentMap: Record<string, string[]> = {
-    go: ["go-reviewer", "go-build-resolver"],
-    rust: ["rust-reviewer", "rust-build-resolver"],
-    python: ["python-reviewer"],
-    typescript: [],
-  }
-  for (const lang of p.languages) {
-    const agents = langAgentMap[lang] || []
-    for (const agent of agents) {
-      subagentLines.push(`- @${agent} — ${lang} code detected`)
-    }
-  }
-  for (const tf of p.testFrameworks) {
-    if (tf === "jest" || tf === "vitest") subagentLines.push("- @tdd-guide — tests detected")
-    if (tf === "playwright") subagentLines.push("- @e2e-runner — Playwright detected")
-  }
-  if (subagentLines.length > 0) {
-    lines.push("### Priority Subagents")
-    lines.push(...subagentLines)
-    lines.push("")
-  }
-
-  const skillLines: string[] = []
-  for (const fw of p.frameworks) {
-    if (fw === "nextjs") skillLines.push("- frontend-patterns — Next.js framework")
-    if (fw === "angular") skillLines.push("- angular-best-practices — Angular framework")
-  }
-  if (p.testFrameworks.includes("playwright")) skillLines.push("- e2e-testing — Playwright detected")
-  if (p.testFrameworks.some(t => t === "jest" || t === "vitest")) skillLines.push("- tdd-workflow — tests detected")
-  if (p.languages.some(l => l === "javascript" || l === "typescript")) {
-    skillLines.push("- backend-patterns — JS/TS backend support")
-  }
-  if (skillLines.length > 0) {
-    lines.push("### Recommended Skills")
-    lines.push(...skillLines)
-    lines.push("")
-  }
-
-  lines.push("At the start of each significant task, use `auto-delegate` to get routing recommendations.")
-  return lines.join("\n")
-}
-
-function readFileSafe(filePath: string): string {
-  try {
-    return fs.readFileSync(filePath, "utf8")
-  } catch {
-    return ""
-  }
-}
-
-function resolveProjectFile(worktreePath: string, relativePath: string): boolean {
-  try {
-    return fs.statSync(path.join(worktreePath, relativePath)).isFile()
-  } catch {
-    return false
-  }
-}
-
-function stripYamlFrontmatter(content: string): string {
-  return content.replace(/^---[\s\S]*?---\n/, "")
-}
-
-function detectPackageManager(cwd: string): string {
-  const lockfiles: Record<string, string> = {
-    "bun.lockb": "bun",
-    "pnpm-lock.yaml": "pnpm",
-    "yarn.lock": "yarn",
-    "package-lock.json": "npm",
-  }
-  for (const [lock, name] of Object.entries(lockfiles)) {
-    if (fs.existsSync(path.join(cwd, lock))) return name
-  }
-  return "npm"
-}
-
-function detectFormatter(cwd: string): string | null {
-  if (fs.existsSync(path.join(cwd, "biome.json")) || fs.existsSync(path.join(cwd, "biome.jsonc"))) return "biome"
-  if (fs.existsSync(path.join(cwd, ".prettierrc")) || fs.existsSync(path.join(cwd, ".prettierrc.json")) || fs.existsSync(path.join(cwd, "prettier.config.js")) || fs.existsSync(path.join(cwd, ".prettierrc.yaml"))) return "prettier"
-  if (fs.existsSync(path.join(cwd, "pyproject.toml"))) return "black"
-  if (fs.existsSync(path.join(cwd, "go.mod"))) return "gofmt"
-  if (fs.existsSync(path.join(cwd, "Cargo.toml"))) return "rustfmt"
-  return null
-}
-
-function detectLinter(cwd: string): string | null {
-  if (fs.existsSync(path.join(cwd, "biome.json")) || fs.existsSync(path.join(cwd, "biome.jsonc"))) return "biome"
-  try {
-    if (fs.readdirSync(cwd).some((f: string) => f.startsWith("eslint.config."))) return "eslint"
-  } catch {}
-  if (fs.existsSync(path.join(cwd, "go.mod"))) return "golangci-lint"
-  if (fs.existsSync(path.join(cwd, "Cargo.toml"))) return "clippy"
-  return null
-}
 
 const editedFiles = new Set<string>()
 
@@ -405,13 +201,13 @@ const securityAuditTool = tool({
 
     report.push("## Phase 2: Secret Scanning")
     report.push("Run the following to scan for hardcoded secrets:")
-    commands.push('grep -rn "api[_-]\\?key\\|sk-[A-Za-z0-9]\\|ghp_\\|gho_\\|ghu_\\|xox[abp]\\|AKIA[0-9A-Z]\\|-----BEGIN RSA PRIVATE KEY-----" --include="*.{ts,js,py,rs,go,java}" --exclude-dir=node_modules --exclude-dir=.git . 2>/dev/null | grep -v "node_modules" | head -30')
+    commands.push('Select-String -Pattern "api[_-]?key|sk-[A-Za-z0-9]|ghp_|gho_|ghu_|xox[abp]|AKIA[0-9A-Z]|-----BEGIN RSA PRIVATE KEY-----" -Path @(Get-ChildItem -Recurse -Include "*.ts","*.js","*.py","*.rs","*.go","*.java" -Exclude "*node_modules*") | Select-Object -First 30')
     report.push("")
 
     report.push("## Phase 3: Anti-Pattern Detection")
     report.push("Run the following to detect dangerous patterns:")
-    commands.push('grep -rn "eval(\\|innerHTML\\|dangerouslySetInnerHTML\\|execSync\\|child_process\\|fromCharCode\\|document.write\\|new Function(" --include="*.{ts,tsx,js,jsx}" --exclude-dir=node_modules . 2>/dev/null | head -20')
-    commands.push('grep -rn "\${.*\\(req\\.query\\|req\\.body\\|req\\.params\\)" --include="*.{ts,js}" --exclude-dir=node_modules . 2>/dev/null | head -10')
+    commands.push('Select-String -Pattern "eval\(|innerHTML|dangerouslySetInnerHTML|execSync|child_process|fromCharCode|document\.write|new Function\(" -Path @(Get-ChildItem -Recurse -Include "*.ts","*.tsx","*.js","*.jsx" -Exclude "*node_modules*") | Select-Object -First 20')
+    commands.push("Get-ChildItem -Recurse -Include '*.ts','*.js' -Exclude '*node_modules*' | Select-String -Pattern 'req\\.(query|body|params)' | Select-Object -First 10")
     report.push("")
 
     report.push("## Commands to Run")
@@ -750,14 +546,14 @@ goal: ${activePlan.summary || ""}
 
       if (event.path.match(/\.(ts|tsx|js|jsx)$/)) {
         try {
-          const result = await $`grep -n "console\\.log" ${event.path} 2>/dev/null`.text()
-          if (result.trim()) {
-            const lines = result.trim().split("\n").length
+          const content = fs.readFileSync(event.path, "utf-8")
+          const matches = content.match(/console\.log/g)
+          if (matches) {
             await client.app.log({
               body: {
                 service: "openecc",
                 level: "warn" as const,
-                message: `console.log found in ${event.path} (${lines} occurrence${lines > 1 ? "s" : ""})`,
+                message: `console.log found in ${event.path} (${matches.length} occurrence${matches.length > 1 ? "s" : ""})`,
               },
             })
           }
@@ -782,8 +578,9 @@ goal: ${activePlan.summary || ""}
       for (const file of editedFiles) {
         if (!file.match(/\.(ts|tsx|js|jsx)$/)) continue
         try {
-          const result = await $`grep -c "console\\.log" ${file} 2>/dev/null`.text()
-          const n = parseInt(result.trim(), 10)
+          const content = fs.readFileSync(file, "utf-8")
+          const matches = content.match(/console\.log/g)
+          const n = matches ? matches.length : 0
           if (n > 0) { count += n; files.push(file) }
         } catch {}
       }

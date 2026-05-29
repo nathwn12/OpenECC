@@ -1,0 +1,6 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  // OpenECC plugin for OpenCode
+  // https://github.com/nathwn12/OpenECC
+  "plugin": ["openecc@git+https://github.com/nathwn12/OpenECC.git"]
+}
