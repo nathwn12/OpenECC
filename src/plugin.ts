@@ -2,12 +2,33 @@ import { tool, type Plugin } from "@opencode-ai/plugin"
 import * as path from "node:path"
 import { fileURLToPath } from "node:url"
 import * as fs from "node:fs"
-import { execSync } from "node:child_process"
-import { detectProject, type ProjectProfile } from "./routing/detect"
+import * as os from "node:os"
+import { exec as execCb } from "node:child_process"
+import { promisify } from "node:util"
+const exec = promisify(execCb) as (cmd: string, opts?: { cwd?: string; timeout?: number }) => Promise<{ stdout: string; stderr: string }>
+import { detectProject, detectPackageManager, detectFormatter, detectLinter, type ProjectProfile } from "./routing/detect"
 import { buildAgentRegistry, buildSkillRegistry } from "./routing/registry"
 import { autoDelegate as autoDelegateFn, analyzeTask as analyzeTaskFn } from "./routing/classifier"
 import { DELEGATION_ENFORCEMENT, TOOL_ACCESS_BLOCK, DELEGATOR_ROLE, QUICK_ROUTING, COMPLETION_CONTRACT } from "./constants"
-import { buildProjectProfileSection, readFileSafe, resolveProjectFile, stripYamlFrontmatter, detectPackageManager, detectFormatter, detectLinter } from "./utils"
+
+interface AgentEntry {
+  name: string
+  desc: string
+  permission?: Record<string, string>
+}
+
+interface CommandEntry {
+  name: string
+  desc: string
+  agent?: string
+  subtask?: boolean
+}
+
+export interface TransformOutput {
+  systemMessages?: Array<{ type: string; text: string }>
+}
+
+import { buildProjectProfileSection, readFileSafe, resolveProjectFile, stripYamlFrontmatter } from "./utils"
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const skillsDir = path.resolve(__dirname, "..", "skills")
@@ -15,16 +36,13 @@ const agentsDir = path.resolve(__dirname, "..", "prompts", "agents")
 const commandsDir = path.resolve(__dirname, "..", "commands")
 const agentsMDPath = path.resolve(__dirname, "..", "..", "AGENTS.md")
 
-let _projectProfile: ProjectProfile | null = null
-let _skillRegistryCache: ReturnType<typeof buildSkillRegistry> | null = null
 let _delegationDepth = 0
-const _capturedResults = new Map<string, any>()
+const _capturedResults = new Map<string, unknown>()
+const _editedFiles = new Set<string>()
 
-const editedFiles = new Set<string>()
-
-const runTestsTool = tool({
+const testCommandTool = tool({
   description:
-    "Run the test suite with optional coverage, watch mode, or specific test patterns. Automatically detects package manager (npm, pnpm, yarn, bun) and test framework.",
+    "[ADVISORY] Returns the test command string to run the test suite with optional coverage, watch mode, or specific test patterns. Automatically detects package manager (npm, pnpm, yarn, bun) and test framework. Does NOT execute the command — use the returned command with bash.",
   args: {
     pattern: tool.schema.string().optional().describe("Test file pattern or specific test name to run"),
     coverage: tool.schema.boolean().optional().describe("Run with coverage reporting"),
@@ -52,8 +70,8 @@ const changedFilesTool = tool({
   args: {},
   async execute(_args, _context) {
     return JSON.stringify({
-      files: Array.from(editedFiles),
-      count: editedFiles.size,
+      files: Array.from(_editedFiles),
+      count: _editedFiles.size,
     })
   },
 })
@@ -66,34 +84,36 @@ const gitSummaryTool = tool({
     const result: Record<string, string> = {}
 
     try {
-      result.branch = execSync("git rev-parse --abbrev-ref HEAD", { cwd, encoding: "utf8", timeout: 3000 }).trim()
+      const { stdout } = await exec("git rev-parse --abbrev-ref HEAD", { cwd, timeout: 3000 })
+      result.branch = stdout.trim()
     } catch {
       result.branch = "(not a git repo)"
     }
 
     try {
-      result.status = execSync("git status --short", { cwd, encoding: "utf8", timeout: 3000 }).trim()
+      const { stdout } = await exec("git status --short", { cwd, timeout: 3000 })
+      result.status = stdout.trim()
     } catch {
       result.status = ""
     }
 
     try {
-      const log = execSync("git log --oneline -5", { cwd, encoding: "utf8", timeout: 3000 }).trim()
-      result.recentCommits = log
+      const { stdout } = await exec("git log --oneline -5", { cwd, timeout: 3000 })
+      result.recentCommits = stdout.trim()
     } catch {
       result.recentCommits = ""
     }
 
     try {
-      const staged = execSync("git diff --cached --name-only", { cwd, encoding: "utf8", timeout: 3000 }).trim()
-      result.stagedFiles = staged
+      const { stdout } = await exec("git diff --cached --name-only", { cwd, timeout: 3000 })
+      result.stagedFiles = stdout.trim()
     } catch {
       result.stagedFiles = ""
     }
 
     try {
-      const unstaged = execSync("git diff --name-only", { cwd, encoding: "utf8", timeout: 3000 }).trim()
-      result.unstagedFiles = unstaged
+      const { stdout } = await exec("git diff --name-only", { cwd, timeout: 3000 })
+      result.unstagedFiles = stdout.trim()
     } catch {
       result.unstagedFiles = ""
     }
@@ -102,9 +122,9 @@ const gitSummaryTool = tool({
   },
 })
 
-const formatCodeTool = tool({
+const formatCommandTool = tool({
   description:
-    "Detect the code formatter (Biome, Prettier, Black, gofmt, rustfmt) and return the exact command to format the project.",
+    "[ADVISORY] Detect the code formatter (Biome, Prettier, Black, gofmt, rustfmt) and return the exact command to format the project. Does NOT execute the command — use the returned command with bash.",
   args: {
     path: tool.schema.string().optional().describe("Specific file or directory to format"),
     check: tool.schema.boolean().optional().describe("Check mode (don't write, just report issues)"),
@@ -141,9 +161,9 @@ const formatCodeTool = tool({
   },
 })
 
-const lintCheckTool = tool({
+const lintCommandTool = tool({
   description:
-    "Detect the linter (ESLint, Biome, Ruff, Pylint, golangci-lint, Clippy) and build the run command.",
+    "[ADVISORY] Detect the linter (ESLint, Biome, Ruff, Pylint, golangci-lint, Clippy) and return the exact command. Does NOT execute the command — use the returned command with bash.",
   args: {
     path: tool.schema.string().optional().describe("Specific file or directory to lint"),
     fix: tool.schema.boolean().optional().describe("Auto-fix issues when supported"),
@@ -199,15 +219,27 @@ const securityAuditTool = tool({
       report.push("")
     }
 
+    const isWin = os.platform() === "win32"
+    const secretPattern = '"api[_-]?key|sk-[A-Za-z0-9]|ghp_|gho_|ghu_|xox[abp]|AKIA[0-9A-Z]|-----BEGIN RSA PRIVATE KEY-----"'
+
     report.push("## Phase 2: Secret Scanning")
     report.push("Run the following to scan for hardcoded secrets:")
-    commands.push('Select-String -Pattern "api[_-]?key|sk-[A-Za-z0-9]|ghp_|gho_|ghu_|xox[abp]|AKIA[0-9A-Z]|-----BEGIN RSA PRIVATE KEY-----" -Path @(Get-ChildItem -Recurse -Include "*.ts","*.js","*.py","*.rs","*.go","*.java" -Exclude "*node_modules*") | Select-Object -First 30')
+    if (isWin) {
+      commands.push(`Select-String -Pattern ${secretPattern} -Path @(Get-ChildItem -Recurse -Include "*.ts","*.js","*.py","*.rs","*.go","*.java" -Exclude "*node_modules*") | Select-Object -First 30`)
+    } else {
+      commands.push(`grep -rn ${secretPattern} --include="*.ts" --include="*.js" --include="*.py" --include="*.rs" --include="*.go" --include="*.java" --exclude-dir=node_modules . | head -30`)
+    }
     report.push("")
 
     report.push("## Phase 3: Anti-Pattern Detection")
     report.push("Run the following to detect dangerous patterns:")
-    commands.push('Select-String -Pattern "eval\(|innerHTML|dangerouslySetInnerHTML|execSync|child_process|fromCharCode|document\.write|new Function\(" -Path @(Get-ChildItem -Recurse -Include "*.ts","*.tsx","*.js","*.jsx" -Exclude "*node_modules*") | Select-Object -First 20')
-    commands.push("Get-ChildItem -Recurse -Include '*.ts','*.js' -Exclude '*node_modules*' | Select-String -Pattern 'req\\.(query|body|params)' | Select-Object -First 10")
+    if (isWin) {
+      commands.push('Select-String -Pattern "eval\\(|innerHTML|dangerouslySetInnerHTML|execSync|child_process|fromCharCode|document\\.write|new Function\\(" -Path @(Get-ChildItem -Recurse -Include "*.ts","*.tsx","*.js","*.jsx" -Exclude "*node_modules*") | Select-Object -First 20')
+      commands.push("Get-ChildItem -Recurse -Include '*.ts','*.js' -Exclude '*node_modules*' | Select-String -Pattern 'req\\.(query|body|params)' | Select-Object -First 10")
+    } else {
+      commands.push('grep -rn "eval(\|innerHTML\|dangerouslySetInnerHTML\|execSync\|child_process\|fromCharCode\|document\.write\|new Function(" --include="*.ts" --include="*.tsx" --include="*.js" --include="*.jsx" --exclude-dir=node_modules . | head -20')
+      commands.push('grep -rn "req\\.(query|body|params)" --include="*.ts" --include="*.js" --exclude-dir=node_modules . | head -10')
+    }
     report.push("")
 
     report.push("## Commands to Run")
@@ -268,8 +300,10 @@ const analyzeTaskTool = tool({
 
 export const OpenECCPlugin: Plugin = async ({ client, directory, $, worktree }) => {
   const worktreePath = worktree || directory
+  let _projectProfile: ProjectProfile | null = null
+  let _skillRegistryCache: ReturnType<typeof buildSkillRegistry> | null = null
 
-  const agents = [
+  const agents: AgentEntry[] = [
     { name: "planner", desc: "Expert planning specialist for complex features and refactoring. Use for implementation planning, architectural changes, or complex refactoring. Trigger: when a task needs structured planning before coding.", permission: { edit: "deny", write: "deny", task: "deny" } },
     { name: "architect", desc: "Software architecture specialist for system design, scalability, and technical decision-making. Use when evaluating architecture, designing systems, or making technical decisions. Trigger: when architecture review or design decisions are needed.", permission: { edit: "deny", write: "deny", task: "deny" } },
     { name: "code-reviewer", desc: "Expert code review specialist. Reviews code for quality, security, and maintainability. Use immediately after writing or modifying code. Trigger: when a file has been edited or written.", permission: { edit: "deny", write: "deny", task: "deny" } },
@@ -301,7 +335,7 @@ export const OpenECCPlugin: Plugin = async ({ client, directory, $, worktree }) 
     { name: "plan-eng-reviewer", desc: "Reviews implementation plans from engineering/architecture perspective. Returns structured feedback: Block (critical issue), Warn (risky), Suggest (improvement), Questions (clarifications needed). Use when a plan needs technical architecture or engineering review. Trigger: when a plan has been created and needs engineering review.", permission: { edit: "deny", write: "deny", task: "deny" } },
     { name: "goal-evaluator", desc: "Evaluates whether a swarm session goal has been met based on conversation context. Read-only: does not run commands or read files. Returns Met | Not Met | Partial with evidence and recommendations. Use as the completion gate in the /swarm pipeline. Trigger: after build and review phases to determine if the goal condition is satisfied.", permission: { edit: "deny", write: "deny", bash: "deny", glob: "deny", grep: "deny", task: "deny" } },
   ]
-  const commands = [
+  const commands: CommandEntry[] = [
     { name: "plan", desc: "Create a detailed implementation plan for complex features or refactoring", agent: "planner", subtask: true },
     { name: "code-review", desc: "Review code for quality, security, and maintainability", agent: "code-reviewer", subtask: true },
     { name: "security", desc: "Run comprehensive security review using OWASP guidelines", agent: "security-reviewer", subtask: true },
@@ -376,8 +410,8 @@ export const OpenECCPlugin: Plugin = async ({ client, directory, $, worktree }) 
               mode: "subagent",
               prompt,
             }
-            if ((agent as any).permission) {
-              agentConfig.permission = (agent as any).permission
+            if (agent.permission) {
+              agentConfig.permission = agent.permission
             }
             config.agent[agent.name] = agentConfig
           }
@@ -408,7 +442,7 @@ export const OpenECCPlugin: Plugin = async ({ client, directory, $, worktree }) 
 
       const soulPath = path.join(skillsDir, "soul", "SKILL.md")
       const soulContent = readFileSafe(soulPath)
-      const cleanSoul = soulContent.replace(/^---[\s\S]*?---\n/, "")
+      const cleanSoul = stripYamlFrontmatter(soulContent)
 
       const systemBootstrap = `<EXTREMELY_IMPORTANT>
 You have a soul — the principles below are always active. They are ALREADY LOADED.
@@ -428,10 +462,11 @@ ${COMPLETION_CONTRACT}
 
 ${buildProjectProfileSection(_projectProfile)}`
 
-      const systemMessages: any[] = (output as any).systemMessages || []
-      if (!systemMessages.some((p: any) => p.text?.includes("EXTREMELY_IMPORTANT"))) {
+      const sysOutput = output as TransformOutput
+      const systemMessages: TransformOutput["systemMessages"] = sysOutput.systemMessages || []
+      if (!systemMessages.some((p) => p.text?.includes("EXTREMELY_IMPORTANT"))) {
         systemMessages.unshift({ type: "text", text: systemBootstrap })
-        ;(output as any).systemMessages = systemMessages
+        sysOutput.systemMessages = systemMessages
       }
 
       try {
@@ -443,7 +478,7 @@ ${buildProjectProfileSection(_projectProfile)}`
         }
         const indexData = JSON.parse(fs.readFileSync(indexJsonPath, "utf8"))
         const activeId = indexData.activePlanId
-        const activePlan = indexData.plans?.find((p: any) => p.id === activeId)
+        const activePlan = indexData.plans?.find((p: Record<string, unknown>) => p.id === activeId)
         if (activePlan) {
           const planBlock = `<structured type="plan_state">
 active_plan: ${activePlan.id}
@@ -452,9 +487,9 @@ done: ${activePlan.done ?? 0}
 total: ${activePlan.total ?? 0}
 goal: ${activePlan.summary || ""}
 </structured>`
-          if (!systemMessages.some((p: any) => p.text?.includes("plan_state"))) {
+          if (!systemMessages.some((p) => p.text?.includes("plan_state"))) {
             systemMessages.push({ type: "text", text: planBlock })
-            ;(output as any).systemMessages = systemMessages
+            sysOutput.systemMessages = systemMessages
           }
         }
       } catch {
@@ -471,6 +506,7 @@ goal: ${activePlan.summary || ""}
       if (!_skillRegistryCache) {
         _skillRegistryCache = buildSkillRegistry(skillsDir)
       }
+      const cache = _skillRegistryCache!
       const firstTextPart: any = firstUser.parts.find((p: any) => p.type === "text")
       const firstUserText = firstTextPart?.text || ""
       if (firstUserText.length >= 2000) return
@@ -478,15 +514,15 @@ goal: ${activePlan.summary || ""}
       const taskAnalysis = analyzeTaskFn(firstUserText.slice(0, 500))
       if (taskAnalysis.category === "general") return
 
-      const skillEntries = Object.entries(_skillRegistryCache)
+      const skillEntries = Object.entries(cache)
       const matchResults = skillEntries.map(([name, trigger]) => {
         const tokens = firstUserText.toLowerCase().split(/[\s,;:.!?()]+/).filter((w: string) => w.length > 1)
         const lowerKeywords = trigger.keywords.map(k => k.toLowerCase())
         const matches = tokens.filter((t: string) => lowerKeywords.includes(t)).length
         const confidence = trigger.keywords.length > 0 ? matches / Math.max(trigger.keywords.length, 1) : 0
-        return { name, confidence, trigger }
+        return { name, confidence }
       })
-      matchResults.sort((a: any, b: any) => b.confidence - a.confidence)
+      matchResults.sort((a, b) => b.confidence - a.confidence)
       const topSkill = matchResults[0]
       if (!topSkill || topSkill.confidence < 0.7) return
 
@@ -497,12 +533,13 @@ goal: ${activePlan.summary || ""}
 
       const autoLoadedSkill = `\n### Auto-Loaded Skill: ${topSkill.name}\n(injected based on task analysis)\n${cleanContent.slice(0, 3000)}\n`
 
+      const originalPart = firstUser.parts[0] as { sessionID?: string; messageID?: string }
       firstUser.parts.unshift({
-        type: "text",
+        type: "text" as const,
         text: autoLoadedSkill,
-        id: firstUser.parts[0].id,
-        sessionID: (firstUser.parts[0] as any).sessionID,
-        messageID: (firstUser.parts[0] as any).messageID,
+        id: `skill-inject-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+        sessionID: originalPart.sessionID || "",
+        messageID: originalPart.messageID || "",
       })
     },
 
@@ -534,15 +571,15 @@ goal: ${activePlan.summary || ""}
         }
         output.context.push("")
       }
-      if (editedFiles.size > 0) {
+      if (_editedFiles.size > 0) {
         output.context.push("## Recently Edited Files")
-        for (const f of editedFiles) output.context.push(`- ${f}`)
+        for (const f of _editedFiles) output.context.push(`- ${f}`)
         output.context.push("")
       }
     },
 
     "file.edited": async (event: { path: string }) => {
-      editedFiles.add(event.path)
+      _editedFiles.add(event.path)
 
       if (event.path.match(/\.(ts|tsx|js|jsx)$/)) {
         try {
@@ -564,18 +601,18 @@ goal: ${activePlan.summary || ""}
     "tool.execute.after": async (input: { tool: string; args?: Record<string, unknown> }, _output: unknown) => {
       const filePath = input.args?.filePath as string | undefined
       if ((input.tool === "edit" || input.tool === "write") && filePath) {
-        editedFiles.add(filePath)
+        _editedFiles.add(filePath)
       }
     },
 
     "session.idle": async () => {
       _delegationDepth = 0
 
-      if (editedFiles.size === 0) return
+      if (_editedFiles.size === 0) return
 
       let count = 0
       const files: string[] = []
-      for (const file of editedFiles) {
+      for (const file of _editedFiles) {
         if (!file.match(/\.(ts|tsx|js|jsx)$/)) continue
         try {
           const content = fs.readFileSync(file, "utf-8")
@@ -595,11 +632,11 @@ goal: ${activePlan.summary || ""}
         })
       }
 
-      editedFiles.clear()
+      _editedFiles.clear()
     },
 
     "session.deleted": async () => {
-      editedFiles.clear()
+      _editedFiles.clear()
     },
 
     "shell.env": async (_input, output) => {
@@ -627,11 +664,11 @@ goal: ${activePlan.summary || ""}
     },
 
     tool: {
-      "run-tests": runTestsTool,
+      "test-command": testCommandTool,
       "changed-files": changedFilesTool,
       "git-summary": gitSummaryTool,
-      "format-code": formatCodeTool,
-      "lint-check": lintCheckTool,
+      "format-command": formatCommandTool,
+      "lint-command": lintCommandTool,
       "security-audit": securityAuditTool,
       "auto-delegate": autoDelegateTool,
       "analyze-task": analyzeTaskTool,

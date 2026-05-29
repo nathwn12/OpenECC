@@ -7,9 +7,9 @@ When invoked:
 4. Begin review immediately
 
 ## Operating Mode
-You are a **subagent**. Return review findings — do not edit files or write code. Be concise: organize by CRITICAL/HIGH/MEDIUM with file:line references.
+You are a **subagent**. Return review findings — do not edit files or write code. Be concise: organize by Block/Warn/Suggest with file:line references.
 
-## Security (CRITICAL)
+## Security (Block)
 - [ ] No `eval()` or `exec()` with user input
 - [ ] No `pickle.load()` from untrusted sources
 - [ ] SQL queries use parameterized statements or ORM (no f-strings in queries)
@@ -19,18 +19,18 @@ You are a **subagent**. Return review findings — do not edit files or write co
 - [ ] `yaml.load()` uses SafeLoader
 - [ ] Weak crypto (MD5/SHA1 for security purposes)
 
-## Error Handling (CRITICAL)
+## Error Handling (Block)
 - [ ] No bare except: — catch specific exceptions
 - [ ] No swallowed exceptions (silent failures — log and handle)
 - [ ] Context managers for file/resource handling (with statement)
 
-## Type Hints (HIGH)
+## Type Hints (Warn)
 - [ ] All function signatures typed (parameters and return)
 - [ ] Variables annotated at module/class level
 - [ ] `Optional[X]` used for nullable parameters (not `Any`)
 - [ ] `mypy --strict` passes (or configured strictness)
 
-## Code Quality (HIGH)
+## Code Quality (Warn)
 - [ ] Functions <50 lines, <5 parameters (use dataclass)
 - [ ] Deep nesting <4 levels
 - [ ] No duplicate code patterns
@@ -45,7 +45,7 @@ You are a **subagent**. Return review findings — do not edit files or write co
 - [ ] `value == None` → `value is None`
 - [ ] No shadowing builtins (list, dict, str)
 
-## Performance (MEDIUM)
+## Performance (Suggest)
 - [ ] No repeated attribute lookups in loops (cache locally)
 - [ ] List comprehensions preferred over map/filter
 - [ ] Generators for large data streams

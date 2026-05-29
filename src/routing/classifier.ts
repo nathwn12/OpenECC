@@ -1,5 +1,5 @@
 import { type ProjectProfile } from "./detect"
-import { type AgentTrigger, type SkillTrigger, matchTriggers } from "./registry"
+import { type AgentTrigger, type SkillTrigger, SWARM_TRIGGERS, matchTriggers } from "./registry"
 
 export type TaskCategory = "planning" | "review" | "build-fix" | "test" | "docs" | "security" | "debug" | "refactor" | "general"
 
@@ -96,7 +96,6 @@ export function autoDelegate(
       reason: `Matched task keywords: ${m.domain}`,
     }))
 
-  const SWARM_TRIGGERS = ["/swarm", "/make", "full pipeline", "pipeline", "end to end", "build and ship", "build & ship"]
   const isSwarm = SWARM_TRIGGERS.some(k => input.toLowerCase().includes(k))
 
   if (isSwarm) {

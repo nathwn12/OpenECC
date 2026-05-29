@@ -4,7 +4,9 @@ import { tool } from "@opencode-ai/plugin";
 import * as path4 from "path";
 import { fileURLToPath } from "url";
 import * as fs4 from "fs";
-import { execSync } from "child_process";
+import * as os from "os";
+import { exec as execCb } from "child_process";
+import { promisify } from "util";
 
 // src/routing/detect.ts
 import * as fs from "fs";
@@ -119,7 +121,11 @@ function detectProject(cwd) {
     const pkg = JSON.parse(pkgRaw);
     if (pkg.name)
       projectName = pkg.name;
-  } catch {}
+  } catch (e) {
+    if (e instanceof SyntaxError) {
+      console.warn(`Invalid package.json in ${cwd}: ${e.message}`);
+    }
+  }
   return {
     languages: detectLanguages(cwd),
     frameworks: detectFrameworks(cwd),
@@ -161,13 +167,14 @@ var AGENT_TRIGGERS = {
   "kotlin-reviewer": { domain: "review", keywords: ["kotlin", "android", "kotlin code", "kotlin review"], permissions: { edit: "deny", write: "deny", task: "deny" } },
   "kotlin-build-resolver": { domain: "build-fix", keywords: ["kotlin", "android", "kotlin build", "gradle", "kotlin compilation"], permissions: { task: "deny" } },
   "database-reviewer": { domain: "review", keywords: ["database", "sql", "postgresql", "supabase", "query", "schema", "migration", "rls", "row level security"], permissions: { task: "deny" } },
-  "swarm-coordinator": { domain: "orchestration", keywords: ["swarm", "pipeline", "end-to-end", "full workflow", "build pipeline", "ci pipeline", "make"], permissions: { edit: "deny", write: "deny" } },
+  "swarm-coordinator": { domain: "orchestration", keywords: ["swarm", "pipeline", "end-to-end", "full workflow", "build pipeline", "ci pipeline", "make", "/swarm", "/make"], permissions: { edit: "deny", write: "deny" } },
   "plan-ceo-reviewer": { domain: "review", keywords: ["ceo review", "business review", "scope review", "product review", "value assessment"], permissions: { edit: "deny", write: "deny", task: "deny" } },
   "plan-design-reviewer": { domain: "review", keywords: ["design review", "ux review", "api design review", "interface review"], permissions: { edit: "deny", write: "deny", task: "deny" } },
   "plan-devex-reviewer": { domain: "review", keywords: ["devex review", "developer experience", "developer workflow", "friction review"], permissions: { edit: "deny", write: "deny", task: "deny" } },
   "plan-eng-reviewer": { domain: "review", keywords: ["engineering review", "architecture review", "technical review", "code review plan"], permissions: { edit: "deny", write: "deny", task: "deny" } },
   "goal-evaluator": { domain: "evaluation", keywords: ["goal", "evaluate", "completion", "done check", "condition met", "acceptance criteria"], permissions: { edit: "deny", write: "deny", task: "deny", bash: "deny", glob: "deny", grep: "deny" } }
 };
+var SWARM_TRIGGERS = ["/swarm", "/make", "full pipeline", "pipeline", "end to end", "end-to-end", "build and ship", "build & ship", "full workflow", "build pipeline"];
 function buildAgentRegistry() {
   return { ...AGENT_TRIGGERS };
 }
@@ -351,7 +358,6 @@ function autoDelegate(input, projectProfile, agentRegistry, skillRegistry) {
     confidence: Math.round(m.confidence * 100) / 100,
     reason: `Matched task keywords: ${m.domain}`
   }));
-  const SWARM_TRIGGERS = ["/swarm", "/make", "full pipeline", "pipeline", "end to end", "build and ship", "build & ship"];
   const isSwarm = SWARM_TRIGGERS.some((k) => input.toLowerCase().includes(k));
   if (isSwarm) {
     recommendedAgents.unshift({
@@ -578,59 +584,19 @@ function resolveProjectFile(worktreePath, relativePath) {
 function stripYamlFrontmatter(content) {
   return content.replace(/^---[\s\S]*?---\n/, "");
 }
-function detectPackageManager2(cwd) {
-  const lockfiles = {
-    "bun.lockb": "bun",
-    "pnpm-lock.yaml": "pnpm",
-    "yarn.lock": "yarn",
-    "package-lock.json": "npm"
-  };
-  for (const [lock, name] of Object.entries(lockfiles)) {
-    if (fs3.existsSync(path3.join(cwd, lock)))
-      return name;
-  }
-  return "npm";
-}
-function detectFormatter2(cwd) {
-  if (fs3.existsSync(path3.join(cwd, "biome.json")) || fs3.existsSync(path3.join(cwd, "biome.jsonc")))
-    return "biome";
-  if (fs3.existsSync(path3.join(cwd, ".prettierrc")) || fs3.existsSync(path3.join(cwd, ".prettierrc.json")) || fs3.existsSync(path3.join(cwd, "prettier.config.js")) || fs3.existsSync(path3.join(cwd, ".prettierrc.yaml")))
-    return "prettier";
-  if (fs3.existsSync(path3.join(cwd, "pyproject.toml")))
-    return "black";
-  if (fs3.existsSync(path3.join(cwd, "go.mod")))
-    return "gofmt";
-  if (fs3.existsSync(path3.join(cwd, "Cargo.toml")))
-    return "rustfmt";
-  return null;
-}
-function detectLinter2(cwd) {
-  if (fs3.existsSync(path3.join(cwd, "biome.json")) || fs3.existsSync(path3.join(cwd, "biome.jsonc")))
-    return "biome";
-  try {
-    if (fs3.readdirSync(cwd).some((f) => f.startsWith("eslint.config.")))
-      return "eslint";
-  } catch {}
-  if (fs3.existsSync(path3.join(cwd, "go.mod")))
-    return "golangci-lint";
-  if (fs3.existsSync(path3.join(cwd, "Cargo.toml")))
-    return "clippy";
-  return null;
-}
 
 // src/plugin.ts
+var exec = promisify(execCb);
 var __dirname2 = path4.dirname(fileURLToPath(import.meta.url));
 var skillsDir = path4.resolve(__dirname2, "..", "skills");
 var agentsDir = path4.resolve(__dirname2, "..", "prompts", "agents");
 var commandsDir = path4.resolve(__dirname2, "..", "commands");
 var agentsMDPath = path4.resolve(__dirname2, "..", "..", "AGENTS.md");
-var _projectProfile = null;
-var _skillRegistryCache = null;
 var _delegationDepth = 0;
 var _capturedResults = new Map;
-var editedFiles = new Set;
-var runTestsTool = tool({
-  description: "Run the test suite with optional coverage, watch mode, or specific test patterns. Automatically detects package manager (npm, pnpm, yarn, bun) and test framework.",
+var _editedFiles = new Set;
+var testCommandTool = tool({
+  description: "[ADVISORY] Returns the test command string to run the test suite with optional coverage, watch mode, or specific test patterns. Automatically detects package manager (npm, pnpm, yarn, bun) and test framework. Does NOT execute the command \u2014 use the returned command with bash.",
   args: {
     pattern: tool.schema.string().optional().describe("Test file pattern or specific test name to run"),
     coverage: tool.schema.boolean().optional().describe("Run with coverage reporting"),
@@ -638,7 +604,7 @@ var runTestsTool = tool({
   },
   async execute(args, context) {
     const cwd = context.worktree || context.directory;
-    const pm = detectPackageManager2(cwd);
+    const pm = detectPackageManager(cwd);
     const cmd = pm === "npm" ? `${pm} run test` : `${pm} test`;
     const flags = [];
     if (args.coverage)
@@ -661,8 +627,8 @@ var changedFilesTool = tool({
   args: {},
   async execute(_args, _context) {
     return JSON.stringify({
-      files: Array.from(editedFiles),
-      count: editedFiles.size
+      files: Array.from(_editedFiles),
+      count: _editedFiles.size
     });
   }
 });
@@ -673,45 +639,47 @@ var gitSummaryTool = tool({
     const cwd = context.worktree || context.directory;
     const result = {};
     try {
-      result.branch = execSync("git rev-parse --abbrev-ref HEAD", { cwd, encoding: "utf8", timeout: 3000 }).trim();
+      const { stdout } = await exec("git rev-parse --abbrev-ref HEAD", { cwd, timeout: 3000 });
+      result.branch = stdout.trim();
     } catch {
       result.branch = "(not a git repo)";
     }
     try {
-      result.status = execSync("git status --short", { cwd, encoding: "utf8", timeout: 3000 }).trim();
+      const { stdout } = await exec("git status --short", { cwd, timeout: 3000 });
+      result.status = stdout.trim();
     } catch {
       result.status = "";
     }
     try {
-      const log = execSync("git log --oneline -5", { cwd, encoding: "utf8", timeout: 3000 }).trim();
-      result.recentCommits = log;
+      const { stdout } = await exec("git log --oneline -5", { cwd, timeout: 3000 });
+      result.recentCommits = stdout.trim();
     } catch {
       result.recentCommits = "";
     }
     try {
-      const staged = execSync("git diff --cached --name-only", { cwd, encoding: "utf8", timeout: 3000 }).trim();
-      result.stagedFiles = staged;
+      const { stdout } = await exec("git diff --cached --name-only", { cwd, timeout: 3000 });
+      result.stagedFiles = stdout.trim();
     } catch {
       result.stagedFiles = "";
     }
     try {
-      const unstaged = execSync("git diff --name-only", { cwd, encoding: "utf8", timeout: 3000 }).trim();
-      result.unstagedFiles = unstaged;
+      const { stdout } = await exec("git diff --name-only", { cwd, timeout: 3000 });
+      result.unstagedFiles = stdout.trim();
     } catch {
       result.unstagedFiles = "";
     }
     return JSON.stringify(result, null, 2);
   }
 });
-var formatCodeTool = tool({
-  description: "Detect the code formatter (Biome, Prettier, Black, gofmt, rustfmt) and return the exact command to format the project.",
+var formatCommandTool = tool({
+  description: "[ADVISORY] Detect the code formatter (Biome, Prettier, Black, gofmt, rustfmt) and return the exact command to format the project. Does NOT execute the command \u2014 use the returned command with bash.",
   args: {
     path: tool.schema.string().optional().describe("Specific file or directory to format"),
     check: tool.schema.boolean().optional().describe("Check mode (don't write, just report issues)")
   },
   async execute(args, context) {
     const cwd = context.worktree || context.directory;
-    const formatter = detectFormatter2(cwd);
+    const formatter = detectFormatter(cwd);
     const target = args.path || ".";
     const formatterCommands = {
       biome: { command: `npx biome format --write ${target}`, checkFlag: `npx biome format ${target}` },
@@ -737,15 +705,15 @@ var formatCodeTool = tool({
     });
   }
 });
-var lintCheckTool = tool({
-  description: "Detect the linter (ESLint, Biome, Ruff, Pylint, golangci-lint, Clippy) and build the run command.",
+var lintCommandTool = tool({
+  description: "[ADVISORY] Detect the linter (ESLint, Biome, Ruff, Pylint, golangci-lint, Clippy) and return the exact command. Does NOT execute the command \u2014 use the returned command with bash.",
   args: {
     path: tool.schema.string().optional().describe("Specific file or directory to lint"),
     fix: tool.schema.boolean().optional().describe("Auto-fix issues when supported")
   },
   async execute(args, context) {
     const cwd = context.worktree || context.directory;
-    const linter = detectLinter2(cwd);
+    const linter = detectLinter(cwd);
     const target = args.path || ".";
     const linterCommands = {
       biome: { command: `npx biome lint ${target}`, fixFlag: `npx biome lint --fix ${target}` },
@@ -786,14 +754,25 @@ var securityAuditTool = tool({
       commands.push("npm audit --audit-level=high");
       report.push("");
     }
+    const isWin = os.platform() === "win32";
+    const secretPattern = '"api[_-]?key|sk-[A-Za-z0-9]|ghp_|gho_|ghu_|xox[abp]|AKIA[0-9A-Z]|-----BEGIN RSA PRIVATE KEY-----"';
     report.push("## Phase 2: Secret Scanning");
     report.push("Run the following to scan for hardcoded secrets:");
-    commands.push('Select-String -Pattern "api[_-]?key|sk-[A-Za-z0-9]|ghp_|gho_|ghu_|xox[abp]|AKIA[0-9A-Z]|-----BEGIN RSA PRIVATE KEY-----" -Path @(Get-ChildItem -Recurse -Include "*.ts","*.js","*.py","*.rs","*.go","*.java" -Exclude "*node_modules*") | Select-Object -First 30');
+    if (isWin) {
+      commands.push(`Select-String -Pattern ${secretPattern} -Path @(Get-ChildItem -Recurse -Include "*.ts","*.js","*.py","*.rs","*.go","*.java" -Exclude "*node_modules*") | Select-Object -First 30`);
+    } else {
+      commands.push(`grep -rn ${secretPattern} --include="*.ts" --include="*.js" --include="*.py" --include="*.rs" --include="*.go" --include="*.java" --exclude-dir=node_modules . | head -30`);
+    }
     report.push("");
     report.push("## Phase 3: Anti-Pattern Detection");
     report.push("Run the following to detect dangerous patterns:");
-    commands.push('Select-String -Pattern "eval(|innerHTML|dangerouslySetInnerHTML|execSync|child_process|fromCharCode|document.write|new Function(" -Path @(Get-ChildItem -Recurse -Include "*.ts","*.tsx","*.js","*.jsx" -Exclude "*node_modules*") | Select-Object -First 20');
-    commands.push("Get-ChildItem -Recurse -Include '*.ts','*.js' -Exclude '*node_modules*' | Select-String -Pattern 'req\\.(query|body|params)' | Select-Object -First 10");
+    if (isWin) {
+      commands.push('Select-String -Pattern "eval\\(|innerHTML|dangerouslySetInnerHTML|execSync|child_process|fromCharCode|document\\.write|new Function\\(" -Path @(Get-ChildItem -Recurse -Include "*.ts","*.tsx","*.js","*.jsx" -Exclude "*node_modules*") | Select-Object -First 20');
+      commands.push("Get-ChildItem -Recurse -Include '*.ts','*.js' -Exclude '*node_modules*' | Select-String -Pattern 'req\\.(query|body|params)' | Select-Object -First 10");
+    } else {
+      commands.push('grep -rn "eval(|innerHTML|dangerouslySetInnerHTML|execSync|child_process|fromCharCode|document.write|new Function(" --include="*.ts" --include="*.tsx" --include="*.js" --include="*.jsx" --exclude-dir=node_modules . | head -20');
+      commands.push('grep -rn "req\\.(query|body|params)" --include="*.ts" --include="*.js" --exclude-dir=node_modules . | head -10');
+    }
     report.push("");
     report.push("## Commands to Run");
     commands.forEach((c) => report.push(`- \`${c}\``));
@@ -846,6 +825,8 @@ var analyzeTaskTool = tool({
 });
 var OpenECCPlugin = async ({ client, directory, $, worktree }) => {
   const worktreePath = worktree || directory;
+  let _projectProfile = null;
+  let _skillRegistryCache = null;
   const agents = [
     { name: "planner", desc: "Expert planning specialist for complex features and refactoring. Use for implementation planning, architectural changes, or complex refactoring. Trigger: when a task needs structured planning before coding.", permission: { edit: "deny", write: "deny", task: "deny" } },
     { name: "architect", desc: "Software architecture specialist for system design, scalability, and technical decision-making. Use when evaluating architecture, designing systems, or making technical decisions. Trigger: when architecture review or design decisions are needed.", permission: { edit: "deny", write: "deny", task: "deny" } },
@@ -980,7 +961,7 @@ $ARGUMENTS`,
       }
       const soulPath = path4.join(skillsDir, "soul", "SKILL.md");
       const soulContent = readFileSafe(soulPath);
-      const cleanSoul = soulContent.replace(/^---[\s\S]*?---\n/, "");
+      const cleanSoul = stripYamlFrontmatter(soulContent);
       const systemBootstrap = `<EXTREMELY_IMPORTANT>
 You have a soul \u2014 the principles below are always active. They are ALREADY LOADED.
 
@@ -998,10 +979,11 @@ ${QUICK_ROUTING}
 ${COMPLETION_CONTRACT}
 
 ${buildProjectProfileSection(_projectProfile)}`;
-      const systemMessages = output.systemMessages || [];
+      const sysOutput = output;
+      const systemMessages = sysOutput.systemMessages || [];
       if (!systemMessages.some((p) => p.text?.includes("EXTREMELY_IMPORTANT"))) {
         systemMessages.unshift({ type: "text", text: systemBootstrap });
-        output.systemMessages = systemMessages;
+        sysOutput.systemMessages = systemMessages;
       }
       try {
         const openeccDir = path4.join(worktreePath, ".openecc");
@@ -1024,7 +1006,7 @@ goal: ${activePlan.summary || ""}
 </structured>`;
           if (!systemMessages.some((p) => p.text?.includes("plan_state"))) {
             systemMessages.push({ type: "text", text: planBlock });
-            output.systemMessages = systemMessages;
+            sysOutput.systemMessages = systemMessages;
           }
         }
       } catch {}
@@ -1040,6 +1022,7 @@ goal: ${activePlan.summary || ""}
       if (!_skillRegistryCache) {
         _skillRegistryCache = buildSkillRegistry(skillsDir);
       }
+      const cache = _skillRegistryCache;
       const firstTextPart = firstUser.parts.find((p) => p.type === "text");
       const firstUserText = firstTextPart?.text || "";
       if (firstUserText.length >= 2000)
@@ -1047,13 +1030,13 @@ goal: ${activePlan.summary || ""}
       const taskAnalysis = analyzeTask(firstUserText.slice(0, 500));
       if (taskAnalysis.category === "general")
         return;
-      const skillEntries = Object.entries(_skillRegistryCache);
+      const skillEntries = Object.entries(cache);
       const matchResults = skillEntries.map(([name, trigger]) => {
         const tokens = firstUserText.toLowerCase().split(/[\s,;:.!?()]+/).filter((w) => w.length > 1);
         const lowerKeywords = trigger.keywords.map((k) => k.toLowerCase());
         const matches = tokens.filter((t) => lowerKeywords.includes(t)).length;
         const confidence = trigger.keywords.length > 0 ? matches / Math.max(trigger.keywords.length, 1) : 0;
-        return { name, confidence, trigger };
+        return { name, confidence };
       });
       matchResults.sort((a, b) => b.confidence - a.confidence);
       const topSkill = matchResults[0];
@@ -1069,12 +1052,13 @@ goal: ${activePlan.summary || ""}
 (injected based on task analysis)
 ${cleanContent.slice(0, 3000)}
 `;
+      const originalPart = firstUser.parts[0];
       firstUser.parts.unshift({
         type: "text",
         text: autoLoadedSkill,
-        id: firstUser.parts[0].id,
-        sessionID: firstUser.parts[0].sessionID,
-        messageID: firstUser.parts[0].messageID
+        id: `skill-inject-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+        sessionID: originalPart.sessionID || "",
+        messageID: originalPart.messageID || ""
       });
     },
     "experimental.session.compacting": async (_input, output) => {
@@ -1105,15 +1089,15 @@ ${cleanContent.slice(0, 3000)}
         }
         output.context.push("");
       }
-      if (editedFiles.size > 0) {
+      if (_editedFiles.size > 0) {
         output.context.push("## Recently Edited Files");
-        for (const f of editedFiles)
+        for (const f of _editedFiles)
           output.context.push(`- ${f}`);
         output.context.push("");
       }
     },
     "file.edited": async (event) => {
-      editedFiles.add(event.path);
+      _editedFiles.add(event.path);
       if (event.path.match(/\.(ts|tsx|js|jsx)$/)) {
         try {
           const content = fs4.readFileSync(event.path, "utf-8");
@@ -1133,16 +1117,16 @@ ${cleanContent.slice(0, 3000)}
     "tool.execute.after": async (input, _output) => {
       const filePath = input.args?.filePath;
       if ((input.tool === "edit" || input.tool === "write") && filePath) {
-        editedFiles.add(filePath);
+        _editedFiles.add(filePath);
       }
     },
     "session.idle": async () => {
       _delegationDepth = 0;
-      if (editedFiles.size === 0)
+      if (_editedFiles.size === 0)
         return;
       let count = 0;
       const files = [];
-      for (const file of editedFiles) {
+      for (const file of _editedFiles) {
         if (!file.match(/\.(ts|tsx|js|jsx)$/))
           continue;
         try {
@@ -1164,16 +1148,16 @@ ${cleanContent.slice(0, 3000)}
           }
         });
       }
-      editedFiles.clear();
+      _editedFiles.clear();
     },
     "session.deleted": async () => {
-      editedFiles.clear();
+      _editedFiles.clear();
     },
     "shell.env": async (_input, output) => {
       output.env.ECC_VERSION = "1.0.0";
       output.env.ECC_PLUGIN = "true";
       output.env.PROJECT_ROOT = worktreePath;
-      const pm = detectPackageManager2(worktreePath);
+      const pm = detectPackageManager(worktreePath);
       if (pm)
         output.env.PACKAGE_MANAGER = pm;
       const langDetectors = {
@@ -1193,11 +1177,11 @@ ${cleanContent.slice(0, 3000)}
       }
     },
     tool: {
-      "run-tests": runTestsTool,
+      "test-command": testCommandTool,
       "changed-files": changedFilesTool,
       "git-summary": gitSummaryTool,
-      "format-code": formatCodeTool,
-      "lint-check": lintCheckTool,
+      "format-command": formatCommandTool,
+      "lint-command": lintCommandTool,
       "security-audit": securityAuditTool,
       "auto-delegate": autoDelegateTool,
       "analyze-task": analyzeTaskTool

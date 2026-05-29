@@ -62,7 +62,7 @@ function detectCI(cwd: string): boolean {
   return false
 }
 
-function detectPackageManager(cwd: string): string {
+export function detectPackageManager(cwd: string): string {
   const lockfiles: Record<string, string> = {
     "bun.lock": "bun",
     "bun.lockb": "bun",
@@ -76,7 +76,7 @@ function detectPackageManager(cwd: string): string {
   return "npm"
 }
 
-function detectFormatter(cwd: string): string | null {
+export function detectFormatter(cwd: string): string | null {
   if (hasFile(cwd, "biome.json", "biome.jsonc")) return "biome"
   if (hasFile(cwd, ".prettierrc", ".prettierrc.json", "prettier.config.js", ".prettierrc.yaml")) return "prettier"
   if (fs.existsSync(path.join(cwd, "pyproject.toml"))) return "black"
@@ -85,7 +85,7 @@ function detectFormatter(cwd: string): string | null {
   return null
 }
 
-function detectLinter(cwd: string): string | null {
+export function detectLinter(cwd: string): string | null {
   if (hasFile(cwd, "biome.json", "biome.jsonc")) return "biome"
   try {
     if (fs.readdirSync(cwd).some((f: string) => f.startsWith("eslint.config."))) return "eslint"
@@ -101,7 +101,11 @@ export function detectProject(cwd: string): ProjectProfile {
     const pkgRaw = fs.readFileSync(path.join(cwd, "package.json"), "utf8")
     const pkg = JSON.parse(pkgRaw)
     if (pkg.name) projectName = pkg.name
-  } catch {}
+  } catch (e) {
+    if (e instanceof SyntaxError) {
+      console.warn(`Invalid package.json in ${cwd}: ${e.message}`)
+    }
+  }
 
   return {
     languages: detectLanguages(cwd),

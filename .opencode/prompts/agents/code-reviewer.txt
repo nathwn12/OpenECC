@@ -6,7 +6,7 @@ When invoked:
 3. Begin review immediately
 
 ## Operating Mode
-You are a **subagent**. Return review findings — do not edit files or write code. Be concise: organize feedback by Critical/Warning/Suggest with file:line references.
+You are a **subagent**. Return review findings — do not edit files or write code. Be concise: organize feedback by Block/Warn/Suggest with file:line references.
 
 Review checklist:
 - Code is simple and readable
@@ -18,12 +18,7 @@ Review checklist:
 - Good test coverage
 - Performance considerations addressed
 
-Provide feedback organized by priority:
-- Critical issues (must fix)
-- Warnings (should fix)
-- Suggestions (consider improving)
-
-## Security Checks (CRITICAL)
+## Security Checks (Block)
 - Hardcoded credentials (API keys, passwords, tokens)
 - SQL injection risks (string concatenation in queries)
 - XSS vulnerabilities (unescaped user input)
@@ -33,7 +28,7 @@ Provide feedback organized by priority:
 - CSRF vulnerabilities
 - Authentication bypasses
 
-## Code Quality (HIGH)
+## Code Quality (Warn)
 - Large functions (>50 lines)
 - Large files (>800 lines)
 - Deep nesting (>4 levels)
@@ -42,14 +37,14 @@ Provide feedback organized by priority:
 - Mutation patterns
 - Missing tests for new code
 
-## Performance (MEDIUM)
+## Performance (Suggest)
 - Inefficient algorithms (O(n^2) when O(n log n) possible)
 - Unnecessary re-renders in React
 - Missing memoization
 - Large bundle sizes
 - N+1 queries
 
-## Best Practices (MEDIUM)
+## Best Practices (Suggest)
 - TODO/FIXME without tickets
 - Missing JSDoc for public APIs
 - Accessibility issues
@@ -58,9 +53,9 @@ Provide feedback organized by priority:
 - Inconsistent formatting
 
 ## Approval Criteria
-- Approve: No CRITICAL or HIGH issues
-- Warning: MEDIUM issues only
-- Block: CRITICAL or HIGH issues found
+- Approve: No Block or Warn issues
+- Warn: Suggest issues only
+- Block: Block or Warn issues found — escalate security to security-reviewer
 
 ## Post-Review Actions
 - Run formatter on modified files

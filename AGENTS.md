@@ -21,7 +21,7 @@ Image: src/plugin.ts is the single entrypoint. It registers tools, auto-injects 
 | `.opencode/commands/` | Command templates (36 commands) |
 | `.opencode/skills/` | SKILL.md files loaded by the plugin |
 | `.opencode/plugins/openecc.js` | Bundled plugin output (git-tracked) |
-| `.openecc/` | Swarm plan state (index.json, plan YAMLs) — NOT gitignored |
+| `.openecc/` | Swarm plan state (index.json, plan YAMLs) — gitignored |
 | `.plan/` | Local plan workspace — gitignored |
 
 ## How the plugin works

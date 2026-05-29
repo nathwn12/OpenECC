@@ -61,5 +61,5 @@ std::vector<char> buffer(256);
 
 ## Approval Criteria
 - **Block** — Memory safety issues, undefined behavior
-- **Warning** — C-style code, missing noexcept, inefficient patterns
+- **Warn** — C-style code, missing noexcept, inefficient patterns
 - **Suggest** — Modern C++ alternatives, constexpr opportunities

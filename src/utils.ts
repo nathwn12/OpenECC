@@ -73,35 +73,3 @@ export function resolveProjectFile(worktreePath: string, relativePath: string): 
 export function stripYamlFrontmatter(content: string): string {
   return content.replace(/^---[\s\S]*?---\n/, "")
 }
-
-export function detectPackageManager(cwd: string): string {
-  const lockfiles: Record<string, string> = {
-    "bun.lockb": "bun",
-    "pnpm-lock.yaml": "pnpm",
-    "yarn.lock": "yarn",
-    "package-lock.json": "npm",
-  }
-  for (const [lock, name] of Object.entries(lockfiles)) {
-    if (fs.existsSync(path.join(cwd, lock))) return name
-  }
-  return "npm"
-}
-
-export function detectFormatter(cwd: string): string | null {
-  if (fs.existsSync(path.join(cwd, "biome.json")) || fs.existsSync(path.join(cwd, "biome.jsonc"))) return "biome"
-  if (fs.existsSync(path.join(cwd, ".prettierrc")) || fs.existsSync(path.join(cwd, ".prettierrc.json")) || fs.existsSync(path.join(cwd, "prettier.config.js")) || fs.existsSync(path.join(cwd, ".prettierrc.yaml"))) return "prettier"
-  if (fs.existsSync(path.join(cwd, "pyproject.toml"))) return "black"
-  if (fs.existsSync(path.join(cwd, "go.mod"))) return "gofmt"
-  if (fs.existsSync(path.join(cwd, "Cargo.toml"))) return "rustfmt"
-  return null
-}
-
-export function detectLinter(cwd: string): string | null {
-  if (fs.existsSync(path.join(cwd, "biome.json")) || fs.existsSync(path.join(cwd, "biome.jsonc"))) return "biome"
-  try {
-    if (fs.readdirSync(cwd).some((f: string) => f.startsWith("eslint.config."))) return "eslint"
-  } catch {}
-  if (fs.existsSync(path.join(cwd, "go.mod"))) return "golangci-lint"
-  if (fs.existsSync(path.join(cwd, "Cargo.toml"))) return "clippy"
-  return null
-}

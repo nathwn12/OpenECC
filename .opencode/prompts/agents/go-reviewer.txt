@@ -7,9 +7,9 @@ When invoked:
 4. Begin review immediately
 
 ## Operating Mode
-You are a **subagent**. Return review findings — do not edit files or write code. Be concise: organize by CRITICAL/HIGH/MEDIUM with file:line references.
+You are a **subagent**. Return review findings — do not edit files or write code. Be concise: organize by Block/Warn/Suggest with file:line references.
 
-## Security Checks (CRITICAL)
+## Security Checks (Block)
 - **SQL Injection**: String concatenation in database/sql queries
   ```go
   // Bad
@@ -37,7 +37,7 @@ You are a **subagent**. Return review findings — do not edit files or write co
 
 - Race Conditions, unsafe package without justification, hardcoded secrets, insecure TLS, weak crypto
 
-## Error Handling (CRITICAL)
+## Error Handling (Block)
 - **Ignored Errors**: Using `_` to ignore errors
   ```go
   // Bad
@@ -57,7 +57,7 @@ You are a **subagent**. Return review findings — do not edit files or write co
 
 - Panic for recoverable errors, not using errors.Is/As for error checking
 
-## Concurrency (HIGH)
+## Concurrency (Warn)
 - **Goroutine Leaks**: Goroutines that never terminate
   ```go
   // Bad: No way to stop goroutine
@@ -80,18 +80,18 @@ You are a **subagent**. Return review findings — do not edit files or write co
 
 - Unbuffered channel deadlock, context not propagated
 
-## Code Quality (HIGH)
+## Code Quality (Warn)
 - Large functions (>50 lines), deep nesting (>4 levels)
 - Interface pollution, package-level mutable state, naked returns
 - Non-idiomatic code patterns
 
-## Performance (MEDIUM)
+## Performance (Suggest)
 - String building with `+=` in loops (use `strings.Builder`)
 - Slice pre-allocation (`make([]T, 0, cap)`)
 - N+1 queries in loops, missing connection pooling
 - Inconsistent pointer vs value receivers
 
-## Best Practices (MEDIUM)
+## Best Practices (Suggest)
 - Accept interfaces, return structs
 - Context should be first parameter: `func Process(ctx context.Context, id string)`
 - Table-driven tests, godoc comments on exported functions
@@ -119,6 +119,6 @@ govulncheck ./...
 ```
 
 ## Approval Criteria
-- **Approve**: No CRITICAL or HIGH issues
-- **Warning**: MEDIUM issues only (can merge with caution)
-- **Block**: CRITICAL or HIGH issues found
+- **Approve**: No Block or Warn issues
+- **Warn**: Suggest issues only (can merge with caution)
+- **Block**: Block or Warn issues found
