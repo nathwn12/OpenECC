@@ -1,5 +1,6 @@
 import * as fs from "node:fs"
 import * as path from "node:path"
+import { type ProjectProfile } from "./detect"
 
 export interface AgentTrigger {
   domain: string
@@ -18,19 +19,6 @@ export interface ScoredRecommendation {
   type: "agent" | "skill"
   confidence: number
   domain: string
-}
-
-interface ProjectProfile {
-  languages: string[]
-  frameworks: string[]
-  testFrameworks: string[]
-  cssFrameworks: string[]
-  packageManager: string
-  formatter: string | null
-  linter: string | null
-  hasDocker: boolean
-  hasCI: boolean
-  projectName: string
 }
 
 const AGENT_TRIGGERS: Record<string, AgentTrigger> = {
@@ -58,6 +46,12 @@ const AGENT_TRIGGERS: Record<string, AgentTrigger> = {
   "kotlin-reviewer": { domain: "review", keywords: ["kotlin", "android", "kotlin code", "kotlin review"], permissions: { edit: "deny", write: "deny", task: "deny" } },
   "kotlin-build-resolver": { domain: "build-fix", keywords: ["kotlin", "android", "kotlin build", "gradle", "kotlin compilation"], permissions: { task: "deny" } },
   "database-reviewer": { domain: "review", keywords: ["database", "sql", "postgresql", "supabase", "query", "schema", "migration", "rls", "row level security"], permissions: { task: "deny" } },
+  "swarm-coordinator": { domain: "orchestration", keywords: ["swarm", "pipeline", "end-to-end", "full workflow", "build pipeline", "ci pipeline", "make"], permissions: { edit: "deny", write: "deny" } },
+  "plan-ceo-reviewer": { domain: "review", keywords: ["ceo review", "business review", "scope review", "product review", "value assessment"], permissions: { edit: "deny", write: "deny", task: "deny" } },
+  "plan-design-reviewer": { domain: "review", keywords: ["design review", "ux review", "api design review", "interface review"], permissions: { edit: "deny", write: "deny", task: "deny" } },
+  "plan-devex-reviewer": { domain: "review", keywords: ["devex review", "developer experience", "developer workflow", "friction review"], permissions: { edit: "deny", write: "deny", task: "deny" } },
+  "plan-eng-reviewer": { domain: "review", keywords: ["engineering review", "architecture review", "technical review", "code review plan"], permissions: { edit: "deny", write: "deny", task: "deny" } },
+  "goal-evaluator": { domain: "evaluation", keywords: ["goal", "evaluate", "completion", "done check", "condition met", "acceptance criteria"], permissions: { edit: "deny", write: "deny", task: "deny", bash: "deny", glob: "deny", grep: "deny" } },
 }
 
 export function buildAgentRegistry(): Record<string, AgentTrigger> {

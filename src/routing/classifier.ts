@@ -1,10 +1,10 @@
 import { type ProjectProfile } from "./detect"
-import { type AgentTrigger, type SkillTrigger, type ScoredRecommendation, matchTriggers, buildAgentRegistry, buildSkillRegistry } from "./registry"
+import { type AgentTrigger, type SkillTrigger, matchTriggers } from "./registry"
 
 export type TaskCategory = "planning" | "review" | "build-fix" | "test" | "docs" | "security" | "debug" | "refactor" | "general"
 
 const PATTERNS: Record<TaskCategory, RegExp[]> = {
-  planning: [/^(plan|design|architecture|how should|what's the best|think about|strategy)/i],
+  planning: [/^(plan|design|architecture|how should|what's the best|think about|strategy)/i, /\/swarm/i, /\/make/i, /full pipeline/i, /end to end/i, /build and ship/i, /pipeline/i],
   review: [/(review|check|audit|look over|inspect)/i],
   "build-fix": [/(build error|compilation error|type error|doesn't compile|fails to build|build fail)/i],
   test: [/(test|spec|coverage|tdd|unit test|integration test)/i],
@@ -96,6 +96,20 @@ export function autoDelegate(
       reason: `Matched task keywords: ${m.domain}`,
     }))
 
+  const SWARM_TRIGGERS = ["/swarm", "/make", "full pipeline", "pipeline", "end to end", "build and ship", "build & ship"]
+  const isSwarm = SWARM_TRIGGERS.some(k => input.toLowerCase().includes(k))
+
+  if (isSwarm) {
+    recommendedAgents.unshift({
+      name: "swarm-coordinator",
+      confidence: 0.9,
+      reason: "Swarm/multi-step pipeline coordination",
+    })
+    if (analysis.category === "general") {
+      analysis.category = "planning"
+    }
+  }
+
   let confidence = 0.5
   if (analysis.category !== "general") confidence = 0.7
   if (recommendedAgents.length > 0) confidence = Math.min(1, confidence + 0.15)
@@ -105,6 +119,9 @@ export function autoDelegate(
     reasoning += ` (sub: ${analysis.subCategories.join(", ")})`
   }
   reasoning += `. Found ${recommendedAgents.length} agent(s) and ${recommendedSkills.length} skill(s).`
+  if (isSwarm) {
+    reasoning += ` Swarm pipeline detected — routed to swarm-coordinator.`
+  }
   if (projectProfile) {
     reasoning += ` Project: ${projectProfile.projectName} (${projectProfile.languages.join(", ") || "unknown"})`
   }

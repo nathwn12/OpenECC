@@ -5,7 +5,6 @@ export interface ProjectProfile {
   languages: string[]
   frameworks: string[]
   testFrameworks: string[]
-  cssFrameworks: string[]
   packageManager: string
   formatter: string | null
   linter: string | null
@@ -50,13 +49,6 @@ function detectTestFrameworks(cwd: string): string[] {
   if (hasFile(cwd, ".mocharc.js", ".mocharc.yml", ".mocharc.json")) frameworks.push("mocha")
   if (fs.existsSync(path.join(cwd, "pytest.ini"))) frameworks.push("pytest")
   if (fs.existsSync(path.join(cwd, "go.mod"))) frameworks.push("go test")
-  return frameworks
-}
-
-function detectCSSFrameworks(cwd: string): string[] {
-  const frameworks: string[] = []
-  if (hasFile(cwd, "tailwind.config.js", "tailwind.config.ts")) frameworks.push("tailwind")
-  if (hasFile(cwd, "postcss.config.js", "postcss.config.mjs")) frameworks.push("postcss")
   return frameworks
 }
 
@@ -115,7 +107,6 @@ export function detectProject(cwd: string): ProjectProfile {
     languages: detectLanguages(cwd),
     frameworks: detectFrameworks(cwd),
     testFrameworks: detectTestFrameworks(cwd),
-    cssFrameworks: detectCSSFrameworks(cwd),
     packageManager: detectPackageManager(cwd),
     formatter: detectFormatter(cwd),
     linter: detectLinter(cwd),
