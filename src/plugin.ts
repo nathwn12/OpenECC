@@ -10,6 +10,8 @@ import { detectProject, detectPackageManager, detectFormatter, detectLinter, typ
 import { buildAgentRegistry, buildSkillRegistry } from "./routing/registry"
 import { autoDelegate as autoDelegateFn, analyzeTask as analyzeTaskFn } from "./routing/classifier"
 import { DELEGATION_ENFORCEMENT, TOOL_ACCESS_BLOCK, DELEGATOR_ROLE, QUICK_ROUTING, COMPLETION_CONTRACT } from "./constants"
+import { GoalManager } from "./goal"
+import { buildToolAccessBlock, classifyIntent, getPlanGate, getActivePlan, updatePlanStatus, readPlanIndex, writePlanIndex } from "./plan-gate"
 
 interface AgentEntry {
   name: string
@@ -22,6 +24,7 @@ interface CommandEntry {
   desc: string
   agent?: string
   subtask?: boolean
+  return?: Array<{ prompt?: string; command?: string }>
 }
 
 export interface TransformOutput {
@@ -39,6 +42,68 @@ const agentsMDPath = path.resolve(__dirname, "..", "..", "AGENTS.md")
 let _delegationDepth = 0
 const _capturedResults = new Map<string, unknown>()
 const _editedFiles = new Set<string>()
+const _namedResults = new Map<string, string>()
+const _pendingReturns = new Map<string, Array<{ prompt?: string; command?: string }>>()
+let _autoContinuePending = false
+const IDLE_CONTINUE_GUARD_MS = 180_000 // 2 * IDLE_DELAY_MS (90s from goal.ts)
+
+interface MessagePart {
+  type: string
+  text?: string
+  id: string
+  sessionID: string
+  messageID: string
+}
+
+interface ChatMessage {
+  info?: { role: string }
+  parts: MessagePart[]
+}
+
+interface SessionPromptClient {
+  session?: {
+    prompt: (opts: { sessionID: string; parts: { type: string; text: string }[] }) => void | Promise<void>
+  }
+}
+
+interface OverrideResult {
+  agent?: string
+  model?: string
+  loop?: number
+  as?: string
+  cleanText: string
+}
+
+function parseOverrides(text: string): OverrideResult {
+  const result: OverrideResult = { cleanText: text }
+  const prefix = text.slice(0, 200) // only parse overrides from command prefix area
+  
+  const agentMatch = prefix.match(/\{agent:(\w+)\}/)
+  if (agentMatch) {
+    result.agent = agentMatch[1]
+    result.cleanText = result.cleanText.replace(agentMatch[0], "").trim()
+  }
+  
+  const modelMatch = prefix.match(/\{model:([\w\/\-\.]+)\}/)
+  if (modelMatch) {
+    result.model = modelMatch[1]
+    result.cleanText = result.cleanText.replace(modelMatch[0], "").trim()
+  }
+  
+  const loopMatch = prefix.match(/\{loop:(\d+)\}/)
+  if (loopMatch) {
+    result.loop = parseInt(loopMatch[1], 10)
+    result.cleanText = result.cleanText.replace(loopMatch[0], "").trim()
+  }
+  
+  const asMatch = prefix.match(/\{as:(\w+)\}/)
+  if (asMatch) {
+    result.as = asMatch[1]
+    result.cleanText = result.cleanText.replace(asMatch[0], "").trim()
+  }
+  
+  return result
+}
 
 const testCommandTool = tool({
   description:
@@ -302,6 +367,7 @@ export const OpenECCPlugin: Plugin = async ({ client, directory, $, worktree }) 
   const worktreePath = worktree || directory
   let _projectProfile: ProjectProfile | null = null
   let _skillRegistryCache: ReturnType<typeof buildSkillRegistry> | null = null
+  const goalManager = new GoalManager(path.join(worktreePath, ".openecc"))
 
   const agents: AgentEntry[] = [
     { name: "planner", desc: "Expert planning specialist for complex features and refactoring. Use for implementation planning, architectural changes, or complex refactoring. Trigger: when a task needs structured planning before coding.", permission: { edit: "deny", write: "deny", task: "deny" } },
@@ -384,6 +450,110 @@ export const OpenECCPlugin: Plugin = async ({ client, directory, $, worktree }) 
       }
       if (input.toolID === "bash") {
         output.description = `[OPENECC ENFORCEMENT] All commands must run inside a subagent. In main context, delegate via \`task\` tool to @executor or language-specific subagent. Rule: no commands in main context. | ${output.description}`
+      }
+    },
+
+    "command.execute.before": async (input: { command: string; arguments: string }, output: { parts: any[] }) => {
+      if (input.command === "goal") {
+      const args = input.arguments
+      if (!args || args.trim() === "") {
+        output.parts = [{ type: "text", text: "Usage: /goal <condition> | /goal status | /goal clear | /goal resume | /goal history", id: "", sessionID: "", messageID: "" }]
+        return
+      }
+      const parts = args.trim().split(/\s+/)
+      const sub = parts[0]?.toLowerCase()
+      if (sub === "status") {
+        output.parts = [{ type: "text", text: goalManager.status().display, id: "", sessionID: "", messageID: "" }]
+      } else if (sub === "clear") {
+        goalManager.clear()
+        output.parts = [{ type: "text", text: "Goal cleared.", id: "", sessionID: "", messageID: "" }]
+      } else if (sub === "resume") {
+        goalManager.resume()
+        output.parts = [{ type: "text", text: "Goal resumed.", id: "", sessionID: "", messageID: "" }]
+      } else if (sub === "history") {
+        output.parts = [{ type: "text", text: JSON.stringify(goalManager.hist(), null, 2), id: "", sessionID: "", messageID: "" }]
+      } else {
+        const condition = args.trim()
+        goalManager.start(condition)
+        output.parts = [{ type: "text", text: `Goal started: "${condition}". I will work toward this goal and stop when complete, blocked, or budget exhausted.`, id: "", sessionID: "", messageID: "" }]
+      }
+      return
+    }
+
+      if (input.command === "plan") {
+        const planArgs = input.arguments?.trim() || ""
+        const planParts = planArgs.split(/\s+/)
+        const sub = planParts[0]?.toLowerCase()
+
+        if (!sub) {
+          output.parts = [{ type: "text", text: "Usage: /plan list | /plan status | /plan create <summary> | /plan transition <id> <status>", id: "", sessionID: "", messageID: "" }]
+          return
+        }
+
+        if (sub === "list") {
+          const idx = readPlanIndex(worktreePath)
+          if (!idx || idx.plans.length === 0) {
+            output.parts = [{ type: "text", text: "No plans found.", id: "", sessionID: "", messageID: "" }]
+            return
+          }
+          const lines = ["## Plans"]
+          for (const p of idx.plans) {
+            lines.push(`- #${p.id}: ${p.summary} (${p.status}, ${p.done}/${p.total})`)
+          }
+          output.parts = [{ type: "text", text: lines.join("\n"), id: "", sessionID: "", messageID: "" }]
+          return
+        }
+
+        if (sub === "status") {
+          const active = getActivePlan(worktreePath)
+          if (!active) {
+            output.parts = [{ type: "text", text: "No active plan.", id: "", sessionID: "", messageID: "" }]
+            return
+          }
+          output.parts = [{ type: "text", text: `Active plan #${active.id}: ${active.summary} (${active.status}, ${active.done}/${active.total})`, id: "", sessionID: "", messageID: "" }]
+          return
+        }
+
+        if (sub === "create") {
+          const summary = planParts.slice(1).join(" ")
+          if (!summary) {
+            output.parts = [{ type: "text", text: "Usage: /plan create <summary>", id: "", sessionID: "", messageID: "" }]
+            return
+          }
+          const idx = readPlanIndex(worktreePath)
+          const index = idx || { nextId: 1, activePlanId: null, plans: [] }
+          const newId = index.nextId || 1
+          index.nextId = newId + 1
+          index.plans.push({ id: newId, summary: summary.length > 80 ? summary.slice(0, 77) + "..." : summary, status: "approved", done: 0, total: 1 })
+          index.activePlanId = newId
+          writePlanIndex(worktreePath, index)
+          output.parts = [{ type: "text", text: `Plan #${newId} created and activated: "${summary}"`, id: "", sessionID: "", messageID: "" }]
+          return
+        }
+
+        if (sub === "transition") {
+          const id = parseInt(planParts[1], 10)
+          const newStatus = planParts[2]
+          if (isNaN(id) || !newStatus) {
+            output.parts = [{ type: "text", text: "Usage: /plan transition <id> <status>", id: "", sessionID: "", messageID: "" }]
+            return
+          }
+          const VALID_STATUSES: readonly string[] = ["draft", "reviewed", "ready", "approved", "in_progress", "done", "blocked", "abandoned"]
+          if (!VALID_STATUSES.includes(newStatus)) {
+            output.parts = [{ type: "text", text: `Invalid status: "${newStatus}". Valid statuses: ${VALID_STATUSES.join(", ")}`, id: "", sessionID: "", messageID: "" }]
+            return
+          }
+          const err = updatePlanStatus(worktreePath, id, newStatus)
+          if (err) {
+            output.parts = [{ type: "text", text: `Error: ${err}`, id: "", sessionID: "", messageID: "" }]
+            return
+          }
+          output.parts = [{ type: "text", text: `Plan #${id} transitioned to ${newStatus}.`, id: "", sessionID: "", messageID: "" }]
+          return
+        }
+
+        output.parts = [{ type: "text", text: `Unknown subcommand: ${sub}. Try: list, status, create, transition`, id: "", sessionID: "", messageID: "" }]
+        return
       }
     },
 
@@ -491,23 +661,42 @@ goal: ${activePlan.summary || ""}
             systemMessages.push({ type: "text", text: planBlock })
             sysOutput.systemMessages = systemMessages
           }
+
+          // inject tool access block
+          const toolBlock = buildToolAccessBlock()
+          if (!systemMessages.some((p) => p.text?.includes("tool_access"))) {
+            systemMessages.push({ type: "text", text: toolBlock })
+          }
         }
       } catch {
         // .openecc init or read failed — skip silently
+      }
+
+      if (goalManager.isActive()) {
+        const goalState = goalManager.getState()
+        const goalBlock = `<goal_objective>
+condition: ${goalState!.condition}
+turns: ${goalState!.turnCount}
+budget_warned: ${goalState!.budgetWarned}
+</goal_objective>`
+        if (!systemMessages.some((p) => p.text?.includes("goal_objective"))) {
+          systemMessages.push({ type: "text", text: goalBlock })
+          sysOutput.systemMessages = systemMessages
+        }
       }
     },
 
     "experimental.chat.messages.transform": async (_input, output) => {
       if (!output.messages?.length) return
-      const firstUser = output.messages.find((m: any) => m.info?.role === "user")
+      const firstUser = output.messages.find((m: ChatMessage) => m.info?.role === "user")
       if (!firstUser || !firstUser.parts?.length) return
-      if (firstUser.parts.some((p: any) => p.type === "text" && p.text?.includes("EXTREMELY_IMPORTANT"))) return
+      if (firstUser.parts.some((p: MessagePart) => p.type === "text" && p.text?.includes("EXTREMELY_IMPORTANT"))) return
 
       if (!_skillRegistryCache) {
         _skillRegistryCache = buildSkillRegistry(skillsDir)
       }
       const cache = _skillRegistryCache!
-      const firstTextPart: any = firstUser.parts.find((p: any) => p.type === "text")
+      const firstTextPart: MessagePart | undefined = firstUser.parts.find((p: MessagePart) => p.type === "text")
       const firstUserText = firstTextPart?.text || ""
       if (firstUserText.length >= 2000) return
 
@@ -533,6 +722,57 @@ goal: ${activePlan.summary || ""}
 
       const autoLoadedSkill = `\n### Auto-Loaded Skill: ${topSkill.name}\n(injected based on task analysis)\n${cleanContent.slice(0, 3000)}\n`
 
+      // ── Plan Gate + Auto-Plan ──────────────────────────────────────────
+      try {
+        const gate = getPlanGate(worktreePath)
+        const parts = output.messages[0].parts as Array<{ type: string; text?: string }>
+        const userText = parts.filter(p => p.type === "text" && typeof p.text === "string").map(p => p.text as string).join(" ")
+        const intent = classifyIntent(userText)
+
+        const TRIVIAL_PATTERNS = ["typo", "semicolon", "rename", "format", "comment", "spelling"]
+        const isTrivial = TRIVIAL_PATTERNS.some(p => userText.toLowerCase().includes(p))
+
+        if (!gate && intent.isWork) {
+          // Gate is open — all good
+        } else if (gate && intent.isWork && !isTrivial) {
+          // Check if this is lightweight enough to auto-create a plan
+          const tokens = userText.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean)
+          const isLightweight = tokens.length <= 20 && !["refactor", "migrate", "architecture", "redesign"].some(k => userText.toLowerCase().includes(k))
+
+          if (isLightweight) {
+            // Auto-create plan
+            const index = readPlanIndex(worktreePath)
+            const idx = index || { nextId: 1, activePlanId: null, plans: [] }
+            const newId = idx.nextId || 1
+            idx.nextId = newId + 1
+            const summary = userText.length > 60 ? userText.slice(0, 57) + "..." : userText
+            idx.plans.push({
+              id: newId,
+              summary,
+              status: "approved",
+              done: 0,
+              total: 1,
+            })
+            idx.activePlanId = newId
+            writePlanIndex(worktreePath, idx)
+
+            // Prepend auto-plan notice
+            const firstText = parts.find(p => p.type === "text")
+            if (firstText && typeof firstText.text === "string") {
+              firstText.text = `[AUTO-PLAN] Created plan ${newId} for: "${summary}". Proceeding.\n\n---\n${firstText.text}`
+            }
+          } else {
+            // Prepend gate warning
+            const firstText = parts.find(p => p.type === "text")
+            if (firstText && typeof firstText.text === "string") {
+              firstText.text = `[PLAN GATE]\n${gate}\n\n---\n${firstText.text}`
+            }
+          }
+        }
+      } catch {
+        // non-fatal
+      }
+
       const originalPart = firstUser.parts[0] as { sessionID?: string; messageID?: string }
       firstUser.parts.unshift({
         type: "text" as const,
@@ -541,6 +781,56 @@ goal: ${activePlan.summary || ""}
         sessionID: originalPart.sessionID || "",
         messageID: originalPart.messageID || "",
       })
+
+      if (goalManager.isActive()) {
+        const msgs = (output.messages ?? []) as ChatMessage[]
+        for (const msg of msgs) {
+          const parts = msg.parts || []
+          for (const part of parts) {
+            const text = (part as MessagePart).text || ""
+            if (msg.info?.role === "assistant") {
+              goalManager.parseMarkers(text)
+              goalManager.trackChars(text.length)
+            } else if (msg.info?.role === "user") {
+              goalManager.trackChars(text.length)
+            }
+          }
+        }
+      }
+
+      // resolve $RESULT[name] references
+      const resolveMessages = (output.messages ?? []) as ChatMessage[]
+      for (const msg of resolveMessages) {
+        for (const part of msg.parts || []) {
+          if (part.type === "text") {
+            const textPart = part as MessagePart
+            if (typeof textPart.text === "string") {
+              textPart.text = textPart.text.replace(/\$RESULT\[(\w+)\]/g, (_: string, name: string) => {
+                return _namedResults.get(name) || `[RESULT ${name}: not found]`
+              })
+            }
+          }
+        }
+      }
+
+      // execute pending returns
+      const sessionKey = "default"
+      const pending = _pendingReturns.get(sessionKey)
+      if (pending && pending.length > 0) {
+        const next = pending.shift()!
+        if (next.command) {
+          const textPart = output.messages?.[0]?.parts?.[0] as MessagePart | undefined
+          if (textPart) {
+            textPart.text = `/${next.command}\n\n${textPart.text || ""}`
+          }
+        } else if (next.prompt) {
+          ;(output.messages as ChatMessage[])?.push({
+            info: { role: "user" },
+            parts: [{ type: "text", text: `[return chain] ${next.prompt}`, id: "", sessionID: "", messageID: "" }],
+          })
+        }
+        if (pending.length === 0) _pendingReturns.delete(sessionKey)
+      }
     },
 
     "experimental.session.compacting": async (_input, output) => {
@@ -567,6 +857,22 @@ goal: ${activePlan.summary || ""}
       if (_capturedResults.size > 0) {
         output.context.push("## Captured Delegation Results")
         for (const [name] of _capturedResults) {
+          output.context.push(`- ${name}: available`)
+        }
+        output.context.push("")
+      }
+      if (goalManager.isActive()) {
+        const s = goalManager.getState()!
+        output.context.push("## Active Goal")
+        output.context.push(`- Condition: ${s.condition}`)
+        output.context.push(`- Turns: ${s.turnCount}`)
+        output.context.push(`- Chars tracked: ${s.totalChars}`)
+        output.context.push(`- No-progress stalls: ${s.noProgressTurns}`)
+        output.context.push("")
+      }
+      if (_namedResults.size > 0) {
+        output.context.push("## Named Results")
+        for (const [name] of _namedResults) {
           output.context.push(`- ${name}: available`)
         }
         output.context.push("")
@@ -603,6 +909,30 @@ goal: ${activePlan.summary || ""}
       if ((input.tool === "edit" || input.tool === "write") && filePath) {
         _editedFiles.add(filePath)
       }
+
+      // named result capture from task calls
+      if (input.tool === "task") {
+        const promptText = typeof input.args?.prompt === "string" ? input.args.prompt : ""
+        const overrides = parseOverrides(promptText)
+        if (overrides.as) {
+          const outputStr = typeof _output === "string" ? _output : JSON.stringify(_output)
+          _namedResults.set(overrides.as, outputStr)
+        }
+      }
+
+      // return chaining from subtask commands
+      if (input.tool === "task") {
+        const promptText = typeof input.args?.prompt === "string" ? input.args.prompt : ""
+        if (promptText.includes("{return:")) {
+          const returnMatch = promptText.match(/\{return:([^}]+)\}/)
+          if (returnMatch) {
+            const sessionKey: string = (input.args?.sessionID as string) || "default"
+            const existing = _pendingReturns.get(sessionKey) || []
+            existing.push({ prompt: returnMatch[1] })
+            _pendingReturns.set(sessionKey, existing)
+          }
+        }
+      }
     },
 
     "session.idle": async () => {
@@ -632,11 +962,57 @@ goal: ${activePlan.summary || ""}
         })
       }
 
+      // Auto-block plan on sustained no-progress
+      if (goalManager.isActive()) {
+        const gs = goalManager.getState()
+        if (gs && gs.noProgressTurns >= 3 && gs.stopped === "no_progress") {
+          const currentPlan = getActivePlan(worktreePath)
+          if (currentPlan && currentPlan.status !== "blocked" && currentPlan.status !== "done") {
+            const err = updatePlanStatus(worktreePath, currentPlan.id, "blocked")
+            if (!err) {
+              await client.app.log({
+                body: {
+                  service: "openecc",
+                  level: "warn" as const,
+                  message: `Plan ${currentPlan.id} auto-blocked: no progress for ${gs.noProgressTurns} turns`,
+                },
+              })
+            }
+          }
+        }
+      }
+
+      if (goalManager.shouldAutoContinue()) {
+        const gs = goalManager.getState()
+        if (gs) {
+          const budget = goalManager.checkBudget(gs.turnCount, gs.totalChars, Date.now() - gs.startedAt)
+          if (budget?.stop) {
+            await client.app.log({
+              body: {
+                service: "openecc",
+                level: "warn" as const,
+                message: `Goal auto-stopped: ${budget.reason}`,
+              },
+            })
+          } else {
+            if (_autoContinuePending) return
+            _autoContinuePending = true
+            const promptClient = client as unknown as SessionPromptClient
+            if (promptClient.session?.prompt) {
+              promptClient.session.prompt({ sessionID: "", parts: [{ type: "text", text: `[auto-continue] Continue working toward goal: "${gs.condition}"` }] })
+            }
+            setTimeout(() => { _autoContinuePending = false }, IDLE_CONTINUE_GUARD_MS)
+          }
+        }
+      }
+
       _editedFiles.clear()
     },
 
     "session.deleted": async () => {
       _editedFiles.clear()
+      goalManager.persist()
+      _namedResults.clear()
     },
 
     "shell.env": async (_input, output) => {

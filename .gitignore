@@ -3,3 +3,4 @@ node_modules/
 dist/
 .openecc/
 .plan/
+PLAN-extractions.md

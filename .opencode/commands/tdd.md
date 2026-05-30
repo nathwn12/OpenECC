@@ -1,6 +1,7 @@
 ---
 description: "Enforce TDD workflow with 80%+ test coverage"
 agent: tdd-guide
+subtask: true
 ---
 
 # TDD Command
@@ -24,3 +25,5 @@ RED → GREEN → REFACTOR → REPEAT
 | Security-critical code | 100% |
 
 **MANDATORY**: Tests must be written BEFORE implementation. Never skip the RED phase.
+
+*Note: When invoked as subtask, the `$ARGUMENTS` variable contains the full user-provided arguments string.*

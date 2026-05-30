@@ -1,9 +1,9 @@
 // @bun
 // src/plugin.ts
 import { tool } from "@opencode-ai/plugin";
-import * as path4 from "path";
+import * as path6 from "path";
 import { fileURLToPath } from "url";
-import * as fs4 from "fs";
+import * as fs6 from "fs";
 import * as os from "os";
 import { exec as execCb } from "child_process";
 import { promisify } from "util";
@@ -506,9 +506,429 @@ var COMPLETION_CONTRACT = `### Before responding
 
 When done: place \`---\` followed by \`**Status:** \u2705 Done | \u1F6A7 Blocked | \uD83D\uDD04 In Progress\``;
 
-// src/utils.ts
+// src/goal.ts
 import * as fs3 from "fs";
 import * as path3 from "path";
+var MAX_TURNS = 50;
+var MAX_TOKENS = 200000;
+var MAX_DURATION_MS = 1800000;
+var WARN_TURNS = 40;
+var WARN_TOKENS = 160000;
+var WARN_DURATION_MS = 1440000;
+var NO_PROGRESS_LIMIT = 3;
+var NO_PROGRESS_THRESHOLD = 5000;
+var IDLE_DELAY_MS = 90000;
+function formatDuration(ms) {
+  const s = Math.floor(ms / 1000);
+  const m = Math.floor(s / 60);
+  const sec = s % 60;
+  return `${m}m${sec}s`;
+}
+function formatGoalStatus(state) {
+  const elapsed = Date.now() - state.startedAt;
+  const lines = ["## Goal Status", ""];
+  lines.push(`Condition: ${state.condition}`);
+  lines.push(`Turns: ${state.turnCount} / ${MAX_TURNS}`);
+  lines.push(`Tokens (approx): ${state.totalChars / 4} / ${MAX_TOKENS}`);
+  lines.push(`Duration: ${formatDuration(elapsed)} / ${formatDuration(MAX_DURATION_MS)}`);
+  if (state.stopped) {
+    lines.push(`Status: STOPPED (${state.stopped})`);
+    if (state.stopReason)
+      lines.push(`Reason: ${state.stopReason}`);
+  } else {
+    lines.push("Status: active");
+  }
+  if (state.noProgressTurns > 0) {
+    lines.push(`No-progress stalls: ${state.noProgressTurns}`);
+  }
+  lines.push("");
+  if (state.checkpoints.length > 0) {
+    lines.push("### Checkpoints");
+    for (const cp of state.checkpoints) {
+      lines.push(`- Turn ${cp.turn}: ${cp.note}`);
+    }
+    lines.push("");
+  }
+  return lines.join(`
+`);
+}
+
+class GoalManager {
+  state = null;
+  dir;
+  statePath;
+  constructor(dir) {
+    this.dir = dir;
+    this.statePath = path3.join(dir, "goal-state.json");
+    this.load();
+  }
+  start(condition) {
+    this.state = {
+      condition,
+      turnCount: 0,
+      totalChars: 0,
+      startedAt: Date.now(),
+      lastActiveAt: Date.now(),
+      stopped: false,
+      noProgressTurns: 0,
+      budgetWarned: false,
+      checkpoints: [],
+      history: [{ action: `start: ${condition}`, at: Date.now() }]
+    };
+    this.persist();
+  }
+  status() {
+    if (!this.state)
+      return { active: false, state: null, display: "No active goal." };
+    return { active: !this.state.stopped, state: this.state, display: formatGoalStatus(this.state) };
+  }
+  clear() {
+    this.state = null;
+    this.deleteFile();
+  }
+  resume() {
+    if (!this.state)
+      return;
+    this.state.stopped = false;
+    this.state.stopReason = undefined;
+    this.state.noProgressTurns = 0;
+    this.state.history.push({ action: "resume", at: Date.now() });
+    this.checkpoint("resumed by user");
+    this.persist();
+  }
+  checkpoint(note) {
+    if (!this.state)
+      return;
+    this.state.checkpoints.push({ turn: this.state.turnCount, at: Date.now(), note });
+  }
+  hist() {
+    return this.state?.history ?? [];
+  }
+  checkBudget(turnCount, totalChars, elapsedMs) {
+    if (!this.state)
+      return null;
+    if (!this.state.stopped) {
+      if (turnCount >= MAX_TURNS) {
+        this.state.stopped = "budget";
+        this.state.stopReason = `Turn limit reached (${MAX_TURNS})`;
+        this.checkpoint("budget: turn limit");
+        this.persist();
+        return { stop: true, reason: this.state.stopReason };
+      }
+      if (totalChars / 4 >= MAX_TOKENS) {
+        this.state.stopped = "budget";
+        this.state.stopReason = `Token budget exhausted (${MAX_TOKENS})`;
+        this.checkpoint("budget: token limit");
+        this.persist();
+        return { stop: true, reason: this.state.stopReason };
+      }
+      if (elapsedMs >= MAX_DURATION_MS) {
+        this.state.stopped = "budget";
+        this.state.stopReason = `Duration limit reached (${formatDuration(MAX_DURATION_MS)})`;
+        this.checkpoint("budget: duration limit");
+        this.persist();
+        return { stop: true, reason: this.state.stopReason };
+      }
+    }
+    if (!this.state.budgetWarned) {
+      if (turnCount >= WARN_TURNS || totalChars / 4 >= WARN_TOKENS || elapsedMs >= WARN_DURATION_MS) {
+        this.state.budgetWarned = true;
+        this.checkpoint("budget: 80% warning zone");
+        this.persist();
+        return { stop: false, reason: "Budget at 80% \u2014 nearing limits" };
+      }
+    }
+    return null;
+  }
+  checkNoProgress(prevChars, currChars) {
+    if (!this.state || this.state.stopped)
+      return false;
+    const diff = Math.abs(currChars - prevChars);
+    if (diff < NO_PROGRESS_THRESHOLD) {
+      this.state.noProgressTurns++;
+      if (this.state.noProgressTurns >= NO_PROGRESS_LIMIT) {
+        this.state.stopped = "no_progress";
+        this.state.stopReason = `No progress detected for ${NO_PROGRESS_LIMIT} consecutive turns`;
+        this.checkpoint("no-progress: stalled");
+        this.persist();
+        return true;
+      }
+    } else {
+      this.state.noProgressTurns = 0;
+    }
+    this.persist();
+    return false;
+  }
+  parseMarkers(text) {
+    if (!text)
+      return null;
+    if (text.includes("[goal:complete]")) {
+      if (this.state && !this.state.stopped) {
+        this.state.stopped = "complete";
+        this.state.stopReason = "Goal marked complete by LLM";
+        this.checkpoint("goal: complete");
+        this.persist();
+      }
+      return "complete";
+    }
+    if (text.includes("[goal:blocked]")) {
+      if (this.state && !this.state.stopped) {
+        this.state.stopped = "blocked";
+        this.state.stopReason = "Goal marked blocked by LLM";
+        this.checkpoint("goal: blocked");
+        this.persist();
+      }
+      return "blocked";
+    }
+    return null;
+  }
+  trackChars(chars) {
+    if (!this.state || this.state.stopped)
+      return;
+    this.state.totalChars += chars;
+    this.state.lastActiveAt = Date.now();
+    this.state.turnCount++;
+    this.persist();
+  }
+  isActive() {
+    return this.state !== null && !this.state.stopped;
+  }
+  getState() {
+    return this.state;
+  }
+  shouldAutoContinue() {
+    if (!this.isActive())
+      return false;
+    return Date.now() - this.state.lastActiveAt >= IDLE_DELAY_MS;
+  }
+  persist() {
+    if (!this.state)
+      return;
+    try {
+      if (!fs3.existsSync(this.dir))
+        fs3.mkdirSync(this.dir, { recursive: true });
+      fs3.writeFileSync(this.statePath, JSON.stringify(this.state, null, 2));
+    } catch {}
+  }
+  load() {
+    try {
+      if (fs3.existsSync(this.statePath)) {
+        const raw = fs3.readFileSync(this.statePath, "utf8");
+        this.state = JSON.parse(raw);
+      }
+    } catch {
+      this.state = null;
+    }
+  }
+  deleteFile() {
+    try {
+      if (fs3.existsSync(this.statePath))
+        fs3.unlinkSync(this.statePath);
+    } catch {}
+  }
+}
+
+// src/plan-gate.ts
+import * as fs4 from "fs";
+import * as path4 from "path";
+var VALID_TRANSITIONS = {
+  draft: ["reviewed", "abandoned"],
+  reviewed: ["ready", "approved", "draft", "abandoned"],
+  ready: ["in_progress", "abandoned"],
+  approved: ["in_progress", "abandoned"],
+  in_progress: ["done", "blocked", "abandoned"],
+  blocked: ["draft", "abandoned"],
+  done: [],
+  abandoned: []
+};
+function validatePlanTransition(current, next) {
+  const allowed = VALID_TRANSITIONS[current];
+  if (!allowed)
+    return false;
+  return allowed.includes(next);
+}
+var _indexWriteQueue = Promise.resolve();
+function indexJsonPath(worktreePath) {
+  return path4.join(worktreePath, ".openecc", "index.json");
+}
+function readPlanIndex(worktreePath) {
+  try {
+    const f = indexJsonPath(worktreePath);
+    if (!fs4.existsSync(f))
+      return null;
+    return JSON.parse(fs4.readFileSync(f, "utf8"));
+  } catch {
+    return null;
+  }
+}
+function writePlanIndex(worktreePath, index) {
+  const f = indexJsonPath(worktreePath);
+  const dir = path4.dirname(f);
+  if (!fs4.existsSync(dir))
+    fs4.mkdirSync(dir, { recursive: true });
+  const tmp = f + ".tmp";
+  fs4.writeFileSync(tmp, JSON.stringify(index, null, 2), "utf8");
+  fs4.renameSync(tmp, f);
+  _indexWriteQueue = _indexWriteQueue.then(() => {}).catch(() => {});
+}
+function getActivePlan(worktreePath) {
+  const idx = readPlanIndex(worktreePath);
+  if (!idx || idx.activePlanId === null)
+    return null;
+  return idx.plans.find((p) => p.id === idx.activePlanId) ?? null;
+}
+function getPlanGate(worktreePath) {
+  const idx = readPlanIndex(worktreePath);
+  if (!idx)
+    return null;
+  if (idx.activePlanId === null) {
+    return "**ACTION REQUIRED:** No active plan. For complex work, create a plan via `.openecc/plan-NNN.yaml` and register it in `index.json`. Only proceed without a plan for trivial Q&A or single-file edits.";
+  }
+  const active = idx.plans.find((p) => p.id === idx.activePlanId);
+  if (!active) {
+    return "**ACTION REQUIRED:** Active plan ID points to nonexistent plan. Reset `activePlanId` in `index.json` or create the plan.";
+  }
+  if (active.status === "blocked") {
+    return `**BLOCKED:** Plan "${active.summary}" (ID ${active.id}) is blocked. Resolve the blocker or create a new plan iteration.`;
+  }
+  if (active.status === "done" || active.status === "abandoned") {
+    return `**INACTIVE:** Plan "${active.summary}" is ${active.status}. Clear \`activePlanId\` or create a new plan.`;
+  }
+  if (active.status !== "approved" && active.status !== "in_progress") {
+    return `**NOT READY:** Plan "${active.summary}" is ${active.status}. Transition to \`approved\` before implementation. Allowed path: draft \u2192 reviewed \u2192 approved \u2192 in_progress.`;
+  }
+  return null;
+}
+var STOPWORDS = new Set([
+  "a",
+  "an",
+  "the",
+  "in",
+  "on",
+  "at",
+  "to",
+  "for",
+  "of",
+  "with",
+  "by",
+  "and",
+  "or",
+  "is",
+  "it",
+  "be",
+  "this",
+  "that"
+]);
+var IMPLEMENT_WORDS = new Set([
+  "implement",
+  "build",
+  "add",
+  "fix",
+  "change",
+  "create",
+  "refactor",
+  "write",
+  "edit",
+  "update",
+  "remove",
+  "delete",
+  "broken",
+  "fails",
+  "error",
+  "feature",
+  "support",
+  "need",
+  "want",
+  "should"
+]);
+var CLARIFY_PATTERNS = ["what is", "how does", "explain", "why", "describe", "tell me", "show me"];
+function classifyIntent(message) {
+  const lower = message.toLowerCase().trim();
+  if (!lower)
+    return { category: "unknown", isWork: false };
+  const QUESTION_PREFIXES = ["is ", "are ", "can ", "could ", "would ", "should ", "does ", "do ", "has ", "have "];
+  const isLikelyQuestion = lower.includes("?") || CLARIFY_PATTERNS.some((p) => lower.includes(p)) || QUESTION_PREFIXES.some((p) => lower.startsWith(p));
+  if (isLikelyQuestion) {
+    return { category: "clarify", isWork: false };
+  }
+  const tokens = lower.split(/[^a-z0-9]+/).filter((t) => t.length > 0);
+  const hasImplToken = tokens.some((t) => IMPLEMENT_WORDS.has(t));
+  const hasPlanToken = tokens.some((t) => t === "plan");
+  const hasReviewPhrase = lower.includes("review") || lower.includes("check") || lower.includes("verify");
+  const hasTestPhrase = lower.includes("test");
+  const hasDebugPhrase = lower.includes("debug") || lower.includes("bug");
+  if (hasPlanToken && hasImplToken) {
+    return { category: "plan", isWork: false };
+  }
+  if (hasReviewPhrase && !hasImplToken) {
+    return { category: "review", isWork: false };
+  }
+  if (hasTestPhrase && !hasImplToken) {
+    return { category: "test", isWork: true };
+  }
+  if (hasDebugPhrase) {
+    return { category: "debug", isWork: true };
+  }
+  if (hasImplToken) {
+    return { category: "implement", isWork: true };
+  }
+  return { category: "unknown", isWork: false };
+}
+function buildToolAccessBlock() {
+  const yaml = `type: tool_access
+main_context_only:
+  allowed:
+    - task
+    - skill
+    - read
+    - question
+    - todowrite
+  description: "Spawn subagents, load skills, read state files, ask user. NO source mutations."
+subagent_only:
+  allowed:
+    - edit
+    - write
+    - glob
+    - grep
+    - bash
+  description: "All source work \u2014 editing, searching, building, testing. NEVER in main context."
+shared:
+  allowed:
+    - webfetch
+  description: "Read-only external fetch. OK in main context sparingly."`;
+  return `<structured type="tool_access">
+${yaml}
+</structured>`;
+}
+function updatePlanStatus(worktreePath, id, newStatus, updates) {
+  const idx = readPlanIndex(worktreePath);
+  if (!idx)
+    return "No plan index found";
+  const entry = idx.plans.find((p) => p.id === id);
+  if (!entry)
+    return `Plan ${id} not found`;
+  if (!validatePlanTransition(entry.status, newStatus)) {
+    return `Invalid transition: ${entry.status} \u2192 ${newStatus}. Valid: ${(VALID_TRANSITIONS[entry.status] || []).join(", ") || "none (terminal state)"}`;
+  }
+  entry.status = newStatus;
+  if (updates?.done !== undefined)
+    entry.done = updates.done;
+  if (updates?.total !== undefined)
+    entry.total = updates.total;
+  if (newStatus === "done" || newStatus === "abandoned") {
+    if (idx.activePlanId === id)
+      idx.activePlanId = null;
+  }
+  if (newStatus === "approved" || newStatus === "in_progress") {
+    idx.activePlanId = id;
+  }
+  writePlanIndex(worktreePath, idx);
+  return null;
+}
+
+// src/utils.ts
+import * as fs5 from "fs";
+import * as path5 from "path";
 function buildProjectProfileSection(p) {
   const lines = [];
   lines.push("### Project Profile (auto-detected)");
@@ -569,14 +989,14 @@ function buildProjectProfileSection(p) {
 }
 function readFileSafe(filePath) {
   try {
-    return fs3.readFileSync(filePath, "utf8");
+    return fs5.readFileSync(filePath, "utf8");
   } catch {
     return "";
   }
 }
 function resolveProjectFile(worktreePath, relativePath) {
   try {
-    return fs3.statSync(path3.join(worktreePath, relativePath)).isFile();
+    return fs5.statSync(path5.join(worktreePath, relativePath)).isFile();
   } catch {
     return false;
   }
@@ -587,14 +1007,43 @@ function stripYamlFrontmatter(content) {
 
 // src/plugin.ts
 var exec = promisify(execCb);
-var __dirname2 = path4.dirname(fileURLToPath(import.meta.url));
-var skillsDir = path4.resolve(__dirname2, "..", "skills");
-var agentsDir = path4.resolve(__dirname2, "..", "prompts", "agents");
-var commandsDir = path4.resolve(__dirname2, "..", "commands");
-var agentsMDPath = path4.resolve(__dirname2, "..", "..", "AGENTS.md");
+var __dirname2 = path6.dirname(fileURLToPath(import.meta.url));
+var skillsDir = path6.resolve(__dirname2, "..", "skills");
+var agentsDir = path6.resolve(__dirname2, "..", "prompts", "agents");
+var commandsDir = path6.resolve(__dirname2, "..", "commands");
+var agentsMDPath = path6.resolve(__dirname2, "..", "..", "AGENTS.md");
 var _delegationDepth = 0;
 var _capturedResults = new Map;
 var _editedFiles = new Set;
+var _namedResults = new Map;
+var _pendingReturns = new Map;
+var _autoContinuePending = false;
+var IDLE_CONTINUE_GUARD_MS = 180000;
+function parseOverrides(text) {
+  const result = { cleanText: text };
+  const prefix = text.slice(0, 200);
+  const agentMatch = prefix.match(/\{agent:(\w+)\}/);
+  if (agentMatch) {
+    result.agent = agentMatch[1];
+    result.cleanText = result.cleanText.replace(agentMatch[0], "").trim();
+  }
+  const modelMatch = prefix.match(/\{model:([\w\/\-\.]+)\}/);
+  if (modelMatch) {
+    result.model = modelMatch[1];
+    result.cleanText = result.cleanText.replace(modelMatch[0], "").trim();
+  }
+  const loopMatch = prefix.match(/\{loop:(\d+)\}/);
+  if (loopMatch) {
+    result.loop = parseInt(loopMatch[1], 10);
+    result.cleanText = result.cleanText.replace(loopMatch[0], "").trim();
+  }
+  const asMatch = prefix.match(/\{as:(\w+)\}/);
+  if (asMatch) {
+    result.as = asMatch[1];
+    result.cleanText = result.cleanText.replace(asMatch[0], "").trim();
+  }
+  return result;
+}
 var testCommandTool = tool({
   description: "[ADVISORY] Returns the test command string to run the test suite with optional coverage, watch mode, or specific test patterns. Automatically detects package manager (npm, pnpm, yarn, bun) and test framework. Does NOT execute the command \u2014 use the returned command with bash.",
   args: {
@@ -747,7 +1196,7 @@ var securityAuditTool = tool({
     const commands = [];
     report.push("# Security Audit Report");
     report.push("");
-    const hasPackageJson = fs4.existsSync(path4.join(cwd, "package.json"));
+    const hasPackageJson = fs6.existsSync(path6.join(cwd, "package.json"));
     if (hasPackageJson) {
       report.push("## Phase 1: Dependency Audit");
       report.push("Run: `npm audit` to check for vulnerable dependencies");
@@ -827,6 +1276,7 @@ var OpenECCPlugin = async ({ client, directory, $, worktree }) => {
   const worktreePath = worktree || directory;
   let _projectProfile = null;
   let _skillRegistryCache = null;
+  const goalManager = new GoalManager(path6.join(worktreePath, ".openecc"));
   const agents = [
     { name: "planner", desc: "Expert planning specialist for complex features and refactoring. Use for implementation planning, architectural changes, or complex refactoring. Trigger: when a task needs structured planning before coding.", permission: { edit: "deny", write: "deny", task: "deny" } },
     { name: "architect", desc: "Software architecture specialist for system design, scalability, and technical decision-making. Use when evaluating architecture, designing systems, or making technical decisions. Trigger: when architecture review or design decisions are needed.", permission: { edit: "deny", write: "deny", task: "deny" } },
@@ -909,6 +1359,103 @@ var OpenECCPlugin = async ({ client, directory, $, worktree }) => {
         output.description = `[OPENECC ENFORCEMENT] All commands must run inside a subagent. In main context, delegate via \`task\` tool to @executor or language-specific subagent. Rule: no commands in main context. | ${output.description}`;
       }
     },
+    "command.execute.before": async (input, output) => {
+      if (input.command === "goal") {
+        const args = input.arguments;
+        if (!args || args.trim() === "") {
+          output.parts = [{ type: "text", text: "Usage: /goal <condition> | /goal status | /goal clear | /goal resume | /goal history", id: "", sessionID: "", messageID: "" }];
+          return;
+        }
+        const parts = args.trim().split(/\s+/);
+        const sub = parts[0]?.toLowerCase();
+        if (sub === "status") {
+          output.parts = [{ type: "text", text: goalManager.status().display, id: "", sessionID: "", messageID: "" }];
+        } else if (sub === "clear") {
+          goalManager.clear();
+          output.parts = [{ type: "text", text: "Goal cleared.", id: "", sessionID: "", messageID: "" }];
+        } else if (sub === "resume") {
+          goalManager.resume();
+          output.parts = [{ type: "text", text: "Goal resumed.", id: "", sessionID: "", messageID: "" }];
+        } else if (sub === "history") {
+          output.parts = [{ type: "text", text: JSON.stringify(goalManager.hist(), null, 2), id: "", sessionID: "", messageID: "" }];
+        } else {
+          const condition = args.trim();
+          goalManager.start(condition);
+          output.parts = [{ type: "text", text: `Goal started: "${condition}". I will work toward this goal and stop when complete, blocked, or budget exhausted.`, id: "", sessionID: "", messageID: "" }];
+        }
+        return;
+      }
+      if (input.command === "plan") {
+        const planArgs = input.arguments?.trim() || "";
+        const planParts = planArgs.split(/\s+/);
+        const sub = planParts[0]?.toLowerCase();
+        if (!sub) {
+          output.parts = [{ type: "text", text: "Usage: /plan list | /plan status | /plan create <summary> | /plan transition <id> <status>", id: "", sessionID: "", messageID: "" }];
+          return;
+        }
+        if (sub === "list") {
+          const idx = readPlanIndex(worktreePath);
+          if (!idx || idx.plans.length === 0) {
+            output.parts = [{ type: "text", text: "No plans found.", id: "", sessionID: "", messageID: "" }];
+            return;
+          }
+          const lines = ["## Plans"];
+          for (const p of idx.plans) {
+            lines.push(`- #${p.id}: ${p.summary} (${p.status}, ${p.done}/${p.total})`);
+          }
+          output.parts = [{ type: "text", text: lines.join(`
+`), id: "", sessionID: "", messageID: "" }];
+          return;
+        }
+        if (sub === "status") {
+          const active = getActivePlan(worktreePath);
+          if (!active) {
+            output.parts = [{ type: "text", text: "No active plan.", id: "", sessionID: "", messageID: "" }];
+            return;
+          }
+          output.parts = [{ type: "text", text: `Active plan #${active.id}: ${active.summary} (${active.status}, ${active.done}/${active.total})`, id: "", sessionID: "", messageID: "" }];
+          return;
+        }
+        if (sub === "create") {
+          const summary = planParts.slice(1).join(" ");
+          if (!summary) {
+            output.parts = [{ type: "text", text: "Usage: /plan create <summary>", id: "", sessionID: "", messageID: "" }];
+            return;
+          }
+          const idx = readPlanIndex(worktreePath);
+          const index = idx || { nextId: 1, activePlanId: null, plans: [] };
+          const newId = index.nextId || 1;
+          index.nextId = newId + 1;
+          index.plans.push({ id: newId, summary: summary.length > 80 ? summary.slice(0, 77) + "..." : summary, status: "approved", done: 0, total: 1 });
+          index.activePlanId = newId;
+          writePlanIndex(worktreePath, index);
+          output.parts = [{ type: "text", text: `Plan #${newId} created and activated: "${summary}"`, id: "", sessionID: "", messageID: "" }];
+          return;
+        }
+        if (sub === "transition") {
+          const id = parseInt(planParts[1], 10);
+          const newStatus = planParts[2];
+          if (isNaN(id) || !newStatus) {
+            output.parts = [{ type: "text", text: "Usage: /plan transition <id> <status>", id: "", sessionID: "", messageID: "" }];
+            return;
+          }
+          const VALID_STATUSES = ["draft", "reviewed", "ready", "approved", "in_progress", "done", "blocked", "abandoned"];
+          if (!VALID_STATUSES.includes(newStatus)) {
+            output.parts = [{ type: "text", text: `Invalid status: "${newStatus}". Valid statuses: ${VALID_STATUSES.join(", ")}`, id: "", sessionID: "", messageID: "" }];
+            return;
+          }
+          const err = updatePlanStatus(worktreePath, id, newStatus);
+          if (err) {
+            output.parts = [{ type: "text", text: `Error: ${err}`, id: "", sessionID: "", messageID: "" }];
+            return;
+          }
+          output.parts = [{ type: "text", text: `Plan #${id} transitioned to ${newStatus}.`, id: "", sessionID: "", messageID: "" }];
+          return;
+        }
+        output.parts = [{ type: "text", text: `Unknown subcommand: ${sub}. Try: list, status, create, transition`, id: "", sessionID: "", messageID: "" }];
+        return;
+      }
+    },
     config: async (config) => {
       config.skills = config.skills || {};
       config.skills.paths = config.skills.paths || [];
@@ -923,7 +1470,7 @@ var OpenECCPlugin = async ({ client, directory, $, worktree }) => {
       config.agent = config.agent || {};
       for (const agent of agents) {
         if (!config.agent[agent.name]) {
-          const prompt = readFileSafe(path4.join(agentsDir, `${agent.name}.txt`));
+          const prompt = readFileSafe(path6.join(agentsDir, `${agent.name}.txt`));
           if (prompt) {
             const agentConfig = {
               description: agent.desc,
@@ -940,7 +1487,7 @@ var OpenECCPlugin = async ({ client, directory, $, worktree }) => {
       config.command = config.command || {};
       for (const cmd of commands) {
         if (!config.command[cmd.name]) {
-          const templateContent = readFileSafe(path4.join(commandsDir, `${cmd.name}.md`));
+          const templateContent = readFileSafe(path6.join(commandsDir, `${cmd.name}.md`));
           const cleanTemplate = stripYamlFrontmatter(templateContent);
           if (cleanTemplate) {
             config.command[cmd.name] = {
@@ -959,7 +1506,7 @@ $ARGUMENTS`,
       if (!_projectProfile) {
         _projectProfile = detectProject(worktreePath);
       }
-      const soulPath = path4.join(skillsDir, "soul", "SKILL.md");
+      const soulPath = path6.join(skillsDir, "soul", "SKILL.md");
       const soulContent = readFileSafe(soulPath);
       const cleanSoul = stripYamlFrontmatter(soulContent);
       const systemBootstrap = `<EXTREMELY_IMPORTANT>
@@ -986,14 +1533,14 @@ ${buildProjectProfileSection(_projectProfile)}`;
         sysOutput.systemMessages = systemMessages;
       }
       try {
-        const openeccDir = path4.join(worktreePath, ".openecc");
-        const indexJsonPath = path4.join(openeccDir, "index.json");
-        if (!fs4.existsSync(openeccDir))
-          fs4.mkdirSync(openeccDir, { recursive: true });
-        if (!fs4.existsSync(indexJsonPath)) {
-          fs4.writeFileSync(indexJsonPath, JSON.stringify({ nextId: 1, activePlanId: null, plans: [] }, null, 2));
+        const openeccDir = path6.join(worktreePath, ".openecc");
+        const indexJsonPath2 = path6.join(openeccDir, "index.json");
+        if (!fs6.existsSync(openeccDir))
+          fs6.mkdirSync(openeccDir, { recursive: true });
+        if (!fs6.existsSync(indexJsonPath2)) {
+          fs6.writeFileSync(indexJsonPath2, JSON.stringify({ nextId: 1, activePlanId: null, plans: [] }, null, 2));
         }
-        const indexData = JSON.parse(fs4.readFileSync(indexJsonPath, "utf8"));
+        const indexData = JSON.parse(fs6.readFileSync(indexJsonPath2, "utf8"));
         const activeId = indexData.activePlanId;
         const activePlan = indexData.plans?.find((p) => p.id === activeId);
         if (activePlan) {
@@ -1008,8 +1555,24 @@ goal: ${activePlan.summary || ""}
             systemMessages.push({ type: "text", text: planBlock });
             sysOutput.systemMessages = systemMessages;
           }
+          const toolBlock = buildToolAccessBlock();
+          if (!systemMessages.some((p) => p.text?.includes("tool_access"))) {
+            systemMessages.push({ type: "text", text: toolBlock });
+          }
         }
       } catch {}
+      if (goalManager.isActive()) {
+        const goalState = goalManager.getState();
+        const goalBlock = `<goal_objective>
+condition: ${goalState.condition}
+turns: ${goalState.turnCount}
+budget_warned: ${goalState.budgetWarned}
+</goal_objective>`;
+        if (!systemMessages.some((p) => p.text?.includes("goal_objective"))) {
+          systemMessages.push({ type: "text", text: goalBlock });
+          sysOutput.systemMessages = systemMessages;
+        }
+      }
     },
     "experimental.chat.messages.transform": async (_input, output) => {
       if (!output.messages?.length)
@@ -1042,7 +1605,7 @@ goal: ${activePlan.summary || ""}
       const topSkill = matchResults[0];
       if (!topSkill || topSkill.confidence < 0.7)
         return;
-      const skillPath = path4.join(skillsDir, topSkill.name, "SKILL.md");
+      const skillPath = path6.join(skillsDir, topSkill.name, "SKILL.md");
       const skillContent = readFileSafe(skillPath);
       const cleanContent = stripYamlFrontmatter(skillContent);
       if (!cleanContent)
@@ -1052,6 +1615,50 @@ goal: ${activePlan.summary || ""}
 (injected based on task analysis)
 ${cleanContent.slice(0, 3000)}
 `;
+      try {
+        const gate = getPlanGate(worktreePath);
+        const parts = output.messages[0].parts;
+        const userText = parts.filter((p) => p.type === "text" && typeof p.text === "string").map((p) => p.text).join(" ");
+        const intent = classifyIntent(userText);
+        const TRIVIAL_PATTERNS = ["typo", "semicolon", "rename", "format", "comment", "spelling"];
+        const isTrivial = TRIVIAL_PATTERNS.some((p) => userText.toLowerCase().includes(p));
+        if (!gate && intent.isWork) {} else if (gate && intent.isWork && !isTrivial) {
+          const tokens = userText.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+          const isLightweight = tokens.length <= 20 && !["refactor", "migrate", "architecture", "redesign"].some((k) => userText.toLowerCase().includes(k));
+          if (isLightweight) {
+            const index = readPlanIndex(worktreePath);
+            const idx = index || { nextId: 1, activePlanId: null, plans: [] };
+            const newId = idx.nextId || 1;
+            idx.nextId = newId + 1;
+            const summary = userText.length > 60 ? userText.slice(0, 57) + "..." : userText;
+            idx.plans.push({
+              id: newId,
+              summary,
+              status: "approved",
+              done: 0,
+              total: 1
+            });
+            idx.activePlanId = newId;
+            writePlanIndex(worktreePath, idx);
+            const firstText = parts.find((p) => p.type === "text");
+            if (firstText && typeof firstText.text === "string") {
+              firstText.text = `[AUTO-PLAN] Created plan ${newId} for: "${summary}". Proceeding.
+
+---
+${firstText.text}`;
+            }
+          } else {
+            const firstText = parts.find((p) => p.type === "text");
+            if (firstText && typeof firstText.text === "string") {
+              firstText.text = `[PLAN GATE]
+${gate}
+
+---
+${firstText.text}`;
+            }
+          }
+        }
+      } catch {}
       const originalPart = firstUser.parts[0];
       firstUser.parts.unshift({
         type: "text",
@@ -1060,6 +1667,54 @@ ${cleanContent.slice(0, 3000)}
         sessionID: originalPart.sessionID || "",
         messageID: originalPart.messageID || ""
       });
+      if (goalManager.isActive()) {
+        const msgs = output.messages ?? [];
+        for (const msg of msgs) {
+          const parts = msg.parts || [];
+          for (const part of parts) {
+            const text = part.text || "";
+            if (msg.info?.role === "assistant") {
+              goalManager.parseMarkers(text);
+              goalManager.trackChars(text.length);
+            } else if (msg.info?.role === "user") {
+              goalManager.trackChars(text.length);
+            }
+          }
+        }
+      }
+      const resolveMessages = output.messages ?? [];
+      for (const msg of resolveMessages) {
+        for (const part of msg.parts || []) {
+          if (part.type === "text") {
+            const textPart = part;
+            if (typeof textPart.text === "string") {
+              textPart.text = textPart.text.replace(/\$RESULT\[(\w+)\]/g, (_, name) => {
+                return _namedResults.get(name) || `[RESULT ${name}: not found]`;
+              });
+            }
+          }
+        }
+      }
+      const sessionKey = "default";
+      const pending = _pendingReturns.get(sessionKey);
+      if (pending && pending.length > 0) {
+        const next = pending.shift();
+        if (next.command) {
+          const textPart = output.messages?.[0]?.parts?.[0];
+          if (textPart) {
+            textPart.text = `/${next.command}
+
+${textPart.text || ""}`;
+          }
+        } else if (next.prompt) {
+          output.messages?.push({
+            info: { role: "user" },
+            parts: [{ type: "text", text: `[return chain] ${next.prompt}`, id: "", sessionID: "", messageID: "" }]
+          });
+        }
+        if (pending.length === 0)
+          _pendingReturns.delete(sessionKey);
+      }
     },
     "experimental.session.compacting": async (_input, output) => {
       output.context.push("# OpenECC Context (preserve across compaction)");
@@ -1089,6 +1744,22 @@ ${cleanContent.slice(0, 3000)}
         }
         output.context.push("");
       }
+      if (goalManager.isActive()) {
+        const s = goalManager.getState();
+        output.context.push("## Active Goal");
+        output.context.push(`- Condition: ${s.condition}`);
+        output.context.push(`- Turns: ${s.turnCount}`);
+        output.context.push(`- Chars tracked: ${s.totalChars}`);
+        output.context.push(`- No-progress stalls: ${s.noProgressTurns}`);
+        output.context.push("");
+      }
+      if (_namedResults.size > 0) {
+        output.context.push("## Named Results");
+        for (const [name] of _namedResults) {
+          output.context.push(`- ${name}: available`);
+        }
+        output.context.push("");
+      }
       if (_editedFiles.size > 0) {
         output.context.push("## Recently Edited Files");
         for (const f of _editedFiles)
@@ -1100,7 +1771,7 @@ ${cleanContent.slice(0, 3000)}
       _editedFiles.add(event.path);
       if (event.path.match(/\.(ts|tsx|js|jsx)$/)) {
         try {
-          const content = fs4.readFileSync(event.path, "utf-8");
+          const content = fs6.readFileSync(event.path, "utf-8");
           const matches = content.match(/console\.log/g);
           if (matches) {
             await client.app.log({
@@ -1119,6 +1790,26 @@ ${cleanContent.slice(0, 3000)}
       if ((input.tool === "edit" || input.tool === "write") && filePath) {
         _editedFiles.add(filePath);
       }
+      if (input.tool === "task") {
+        const promptText = typeof input.args?.prompt === "string" ? input.args.prompt : "";
+        const overrides = parseOverrides(promptText);
+        if (overrides.as) {
+          const outputStr = typeof _output === "string" ? _output : JSON.stringify(_output);
+          _namedResults.set(overrides.as, outputStr);
+        }
+      }
+      if (input.tool === "task") {
+        const promptText = typeof input.args?.prompt === "string" ? input.args.prompt : "";
+        if (promptText.includes("{return:")) {
+          const returnMatch = promptText.match(/\{return:([^}]+)\}/);
+          if (returnMatch) {
+            const sessionKey = input.args?.sessionID || "default";
+            const existing = _pendingReturns.get(sessionKey) || [];
+            existing.push({ prompt: returnMatch[1] });
+            _pendingReturns.set(sessionKey, existing);
+          }
+        }
+      }
     },
     "session.idle": async () => {
       _delegationDepth = 0;
@@ -1130,7 +1821,7 @@ ${cleanContent.slice(0, 3000)}
         if (!file.match(/\.(ts|tsx|js|jsx)$/))
           continue;
         try {
-          const content = fs4.readFileSync(file, "utf-8");
+          const content = fs6.readFileSync(file, "utf-8");
           const matches = content.match(/console\.log/g);
           const n = matches ? matches.length : 0;
           if (n > 0) {
@@ -1148,10 +1839,56 @@ ${cleanContent.slice(0, 3000)}
           }
         });
       }
+      if (goalManager.isActive()) {
+        const gs = goalManager.getState();
+        if (gs && gs.noProgressTurns >= 3 && gs.stopped === "no_progress") {
+          const currentPlan = getActivePlan(worktreePath);
+          if (currentPlan && currentPlan.status !== "blocked" && currentPlan.status !== "done") {
+            const err = updatePlanStatus(worktreePath, currentPlan.id, "blocked");
+            if (!err) {
+              await client.app.log({
+                body: {
+                  service: "openecc",
+                  level: "warn",
+                  message: `Plan ${currentPlan.id} auto-blocked: no progress for ${gs.noProgressTurns} turns`
+                }
+              });
+            }
+          }
+        }
+      }
+      if (goalManager.shouldAutoContinue()) {
+        const gs = goalManager.getState();
+        if (gs) {
+          const budget = goalManager.checkBudget(gs.turnCount, gs.totalChars, Date.now() - gs.startedAt);
+          if (budget?.stop) {
+            await client.app.log({
+              body: {
+                service: "openecc",
+                level: "warn",
+                message: `Goal auto-stopped: ${budget.reason}`
+              }
+            });
+          } else {
+            if (_autoContinuePending)
+              return;
+            _autoContinuePending = true;
+            const promptClient = client;
+            if (promptClient.session?.prompt) {
+              promptClient.session.prompt({ sessionID: "", parts: [{ type: "text", text: `[auto-continue] Continue working toward goal: "${gs.condition}"` }] });
+            }
+            setTimeout(() => {
+              _autoContinuePending = false;
+            }, IDLE_CONTINUE_GUARD_MS);
+          }
+        }
+      }
       _editedFiles.clear();
     },
     "session.deleted": async () => {
       _editedFiles.clear();
+      goalManager.persist();
+      _namedResults.clear();
     },
     "shell.env": async (_input, output) => {
       output.env.ECC_VERSION = "1.0.0";

@@ -1,6 +1,7 @@
 ---
 description: "Run comprehensive security review using OWASP guidelines"
 agent: security-reviewer
+subtask: true
 ---
 
 # Security Review Command
@@ -16,3 +17,5 @@ Analyze the specified code for security vulnerabilities following OWASP Top 10 g
 - **Recommendations** — Security improvements
 
 **IMPORTANT**: Security issues are blockers. Do not proceed until critical issues are resolved.
+
+*Note: When invoked as subtask, the `$ARGUMENTS` variable contains the full user-provided arguments string.*
