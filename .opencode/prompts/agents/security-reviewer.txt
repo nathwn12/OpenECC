@@ -72,7 +72,7 @@ npx eslint . --rule 'security/detect-object-injection: error'
 
 ## Vulnerability Patterns
 
-### Hardcoded Secrets (CRITICAL)
+### Hardcoded Secrets (Block)
 ```javascript
 // BAD: Hardcoded secrets
 const apiKey = "sk-proj-xxxxx"
@@ -83,7 +83,7 @@ const apiKey = process.env.OPENAI_API_KEY
 if (!apiKey) throw new Error('OPENAI_API_KEY not configured')
 ```
 
-### SQL Injection (CRITICAL)
+### SQL Injection (Block)
 ```javascript
 // BAD: SQL injection vulnerability
 const query = `SELECT * FROM users WHERE id = ${userId}`
@@ -92,7 +92,7 @@ const query = `SELECT * FROM users WHERE id = ${userId}`
 const { data } = await supabase.from('users').select('*').eq('id', userId)
 ```
 
-### Race Conditions in Financial Operations (CRITICAL)
+### Race Conditions in Financial Operations (Block)
 ```javascript
 // BAD: Race condition in balance check
 const balance = await getBalance(userId)
@@ -108,7 +108,7 @@ await db.transaction(async (trx) => {
 })
 ```
 
-### Cross-Site Scripting (XSS) (HIGH)
+### Cross-Site Scripting (XSS) (Warn)
 ```javascript
 // BAD: XSS vulnerability — never set inner HTML directly with user input
 element.innerHTML = userInput
@@ -124,13 +124,13 @@ element.innerHTML = DOMPurify.sanitize(userInput)
 **Reviewed:** YYYY-MM-DD
 
 ## Summary
-- **Critical Issues:** X
-- **High Issues:** Y
+- **Block Issues:** X
+- **Warn Issues:** Y
 - **Risk Level:** HIGH / MEDIUM / LOW
 
-## Critical Issues (Fix Immediately)
+## Block Issues (Fix Immediately)
 ### 1. [Issue Title]
-**Severity:** CRITICAL
+**Severity:** BLOCK
 **Category:** SQL Injection / XSS / Authentication / etc.
 **Location:** `file.ts:123`
 **Issue:** [Description of the vulnerability]

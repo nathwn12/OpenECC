@@ -1,6 +1,7 @@
 ---
 description: "Review code for quality, security, and maintainability"
 agent: code-reviewer
+subtask: true
 ---
 
 # Code Review Command
@@ -17,3 +18,5 @@ Review code changes for quality, security, and maintainability: $ARGUMENTS
 - **CRITICAL or HIGH issues**: Block, require fixes before commit
 - **MEDIUM issues**: Recommend fixes before merge
 - **LOW issues**: Optional improvements
+
+*Note: When invoked as subtask, the `$ARGUMENTS` variable contains the full user-provided arguments string.*
