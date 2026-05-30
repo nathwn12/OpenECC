@@ -7,6 +7,9 @@ import {
   createPlan, createBuiltinPlan, isValidProjectDir, buildToolAccessBlock,
   updatePlanStatus, type PlanIndex, type PlanIndexEntry,
 } from "./plan-gate"
+import { getPackageInfo, getOpenEccVersion } from "./identity"
+import { detectShell } from "./shell"
+import { incrementAttempt, buildExecutionContextBlock } from "./execution"
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const skillsDir = path.resolve(__dirname, "..", "skills")
@@ -296,29 +299,54 @@ export const OpenECCPlugin: Plugin = async ({ client, directory, worktree }) => 
     "experimental.chat.system.transform": async (_input, output: any) => {
       if (!projectProfile) projectProfile = detectProject(worktreePath)
 
+      const pkg = getPackageInfo()
+      const shell = detectShell()
+
       const soulPath = path.join(skillsDir, "soul", "SKILL.md")
       const soulContent = readFileSafe(soulPath)
       const cleanSoul = stripYamlFrontmatter(soulContent)
 
-      const systemBootstrap = `<EXTREMELY_IMPORTANT>
+      const identityBlock = `<EXTREMELY_IMPORTANT>
+I am OpenECC, your engineering workflow layer.
+
+I know my version (\`${pkg.version}\`), my install path (\`${pkg.root}\`), and my job: route work to specialists, gate plans until approved, track goals, and never claim done without verification. I report to you directly with synthesized results. Everything else is delegated.
+
 You have a soul — the principles below are always active. They are ALREADY LOADED.
 
 ${cleanSoul}
-</EXTREMELY_IMPORTANT>
+</EXTREMELY_IMPORTANT>`
 
-${DELEGATOR_ROLE}
+      const runtimeBlock = `<structured type="runtime">
+type: runtime
+openecc_version: ${pkg.version}
+package_root: ${pkg.root}
+skills_directory: ${pkg.skillsDir}
+cache_root: ${pkg.cacheRoot}
+</structured>`
 
-${DELEGATION_ENFORCEMENT}
-
-${buildToolAccessBlock()}
-
-${COMPLETION_CONTRACT}
-
-${buildProjectProfileSection(projectProfile)}`
+      const shellBlock = `<structured type="shell">
+type: shell
+detected: ${shell.shellType}
+preferred_syntax: ${shell.preferredSyntax}
+anti_patterns: [${shell.antiPatterns.join(", ")}]
+guidance: ${shell.guidance}
+</structured>`
 
       const systemMessages = output.systemMessages || []
       if (!systemMessages.some((p: any) => p.text?.includes("EXTREMELY_IMPORTANT"))) {
-        systemMessages.unshift({ type: "text", text: systemBootstrap })
+        const fullBootstrap = [
+          identityBlock,
+          runtimeBlock,
+          shellBlock,
+          buildExecutionContextBlock(),
+          DELEGATOR_ROLE,
+          DELEGATION_ENFORCEMENT,
+          buildToolAccessBlock(),
+          COMPLETION_CONTRACT,
+          buildProjectProfileSection(projectProfile),
+        ].join("\n\n")
+
+        systemMessages.unshift({ type: "text", text: fullBootstrap })
         output.systemMessages = systemMessages
       }
 
@@ -362,6 +390,9 @@ turns: ${gs.turnCount}
       const userText = parts.filter(p => p.type === "text" && typeof p.text === "string").map(p => p.text as string).join(" ")
       if (!userText || userText.length >= 2000) return
 
+      // ── Execution tracking ────────────────────────────────────
+      incrementAttempt()
+
       // ── Plan Gate (3-tier routing) ─────────────────────────────
       try {
         const intent = classifyIntent(userText)
@@ -403,8 +434,10 @@ turns: ${gs.turnCount}
     },
 
     "experimental.session.compacting": async (_input, output: any) => {
+      const pkg = getPackageInfo()
       output.context.push("# OpenECC Context (preserve across compaction)")
-      output.context.push("", "## OpenECC Delegator")
+      output.context.push("", `## OpenECC v${pkg.version}`)
+      output.context.push(`- Package root: ${pkg.root}`)
       output.context.push("- Primary role: delegate to subagents, synthesize results, verify before claiming")
       output.context.push("- Soul: Think Before Coding, Simplicity First, Surgical Changes, Goal-Driven Execution")
       output.context.push("- Route by task type: planning, review, build-fix, TDD, docs, language-specific")
@@ -436,7 +469,8 @@ turns: ${gs.turnCount}
     },
 
     "session.created": async () => {
-      await client.app.log({ body: { service: "openecc", level: "info" as const, message: "Session started — OpenECC active" } })
+      const pkg = getPackageInfo()
+      await client.app.log({ body: { service: "openecc", level: "info" as const, message: `Session started — OpenECC v${pkg.version} active` } })
     },
 
     "session.deleted": async () => {

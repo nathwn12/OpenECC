@@ -1,6 +1,7 @@
 import * as fs from "node:fs"
 import * as os from "node:os"
 import * as path from "node:path"
+import { getOpenEccVersion } from "./identity"
 
 // ── State Machine ──────────────────────────────────────────────────────────
 
@@ -187,7 +188,7 @@ export function migrateOpeneccState(worktreePath: string): PlanIndex | null {
     for (const f of old) fs.unlinkSync(path.join(d, f))
     // Write fresh index
     const fresh: PlanIndex = {
-      openeccVersion: "0.3",
+      openeccVersion: getOpenEccVersion(),
       schemaVersion: 3,
       projectDir: worktreePath,
       projectName: path.basename(worktreePath),
@@ -328,7 +329,7 @@ export function classifyTaskScope(text: string): TaskScope {
 
 function buildPlanStub(worktreePath: string): { idx: PlanIndex } {
   const idx = readPlanIndex(worktreePath) || {
-    openeccVersion: "0.3",
+    openeccVersion: getOpenEccVersion(),
     schemaVersion: 3,
     projectDir: worktreePath,
     projectName: path.basename(worktreePath),

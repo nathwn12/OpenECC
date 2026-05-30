@@ -1,13 +1,62 @@
 // @bun
 // src/plugin.ts
-import * as path2 from "path";
-import * as fs2 from "fs";
-import { fileURLToPath } from "url";
+import * as path3 from "path";
+import * as fs3 from "fs";
+import { fileURLToPath as fileURLToPath2 } from "url";
 
 // src/plan-gate.ts
+import * as fs2 from "fs";
+import * as os2 from "os";
+import * as path2 from "path";
+
+// src/identity.ts
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
+import { fileURLToPath } from "url";
+var __dirname2 = path.dirname(fileURLToPath(import.meta.url));
+var _version = null;
+var _pkgInfo = null;
+function findPackageRoot(fromDir) {
+  let current = fromDir;
+  for (let i = 0;i < 5; i++) {
+    const pj = path.join(current, "package.json");
+    if (fs.existsSync(pj)) {
+      try {
+        const pkg = JSON.parse(fs.readFileSync(pj, "utf8"));
+        if (pkg.name === "openecc")
+          return current;
+      } catch {}
+    }
+    const parent = path.resolve(current, "..");
+    if (parent === current)
+      break;
+    current = parent;
+  }
+  return null;
+}
+function getOpenEccVersion() {
+  if (_version)
+    return _version;
+  try {
+    const pkgRoot = findPackageRoot(__dirname2) ?? findPackageRoot(path.resolve(__dirname2, "..")) ?? path.resolve(__dirname2, "..");
+    const pkg = JSON.parse(fs.readFileSync(path.join(pkgRoot, "package.json"), "utf8"));
+    _version = pkg.version ?? null;
+  } catch {}
+  return _version ?? "0.0.0";
+}
+function getPackageInfo() {
+  if (_pkgInfo)
+    return _pkgInfo;
+  const root = findPackageRoot(__dirname2) ?? findPackageRoot(path.resolve(__dirname2, "..")) ?? path.resolve(__dirname2, "..");
+  const version = getOpenEccVersion();
+  const skillsDir = path.join(root, ".opencode", "skills");
+  const cacheRoot = path.join(os.homedir(), ".cache", "opencode", "packages");
+  _pkgInfo = { version, root, skillsDir, cacheRoot };
+  return _pkgInfo;
+}
+
+// src/plan-gate.ts
 var VALID_TRANSITIONS = {
   draft: ["reviewed", "abandoned"],
   reviewed: ["ready", "approved", "draft", "abandoned"],
@@ -26,20 +75,20 @@ function validatePlanTransition(current, next) {
 }
 var _indexWriteQueue = Promise.resolve();
 function openeccDir(worktreePath) {
-  return path.join(worktreePath, ".openecc");
+  return path2.join(worktreePath, ".openecc");
 }
 function indexJsonPath(worktreePath) {
-  return path.join(openeccDir(worktreePath), "index.json");
+  return path2.join(openeccDir(worktreePath), "index.json");
 }
 function planYamlPath(worktreePath, planId) {
-  return path.join(openeccDir(worktreePath), `${planId}.yaml`);
+  return path2.join(openeccDir(worktreePath), `${planId}.yaml`);
 }
 function readPlanFile(worktreePath, planId) {
   try {
     const f = planYamlPath(worktreePath, planId);
-    if (!fs.existsSync(f))
+    if (!fs2.existsSync(f))
       return null;
-    const raw = fs.readFileSync(f, "utf8");
+    const raw = fs2.readFileSync(f, "utf8");
     return parsePlanYaml(raw);
   } catch {
     return null;
@@ -48,19 +97,19 @@ function readPlanFile(worktreePath, planId) {
 function writePlanFile(worktreePath, plan) {
   const yaml = serializePlanYaml(plan);
   const f = planYamlPath(worktreePath, plan.id);
-  const dir = path.dirname(f);
-  if (!fs.existsSync(dir))
-    fs.mkdirSync(dir, { recursive: true });
+  const dir = path2.dirname(f);
+  if (!fs2.existsSync(dir))
+    fs2.mkdirSync(dir, { recursive: true });
   const tmp = f + ".tmp";
-  fs.writeFileSync(tmp, yaml, "utf8");
-  fs.renameSync(tmp, f);
+  fs2.writeFileSync(tmp, yaml, "utf8");
+  fs2.renameSync(tmp, f);
 }
 function readPlanIndex(worktreePath) {
   try {
     const f = indexJsonPath(worktreePath);
-    if (!fs.existsSync(f))
+    if (!fs2.existsSync(f))
       return null;
-    const raw = JSON.parse(fs.readFileSync(f, "utf8"));
+    const raw = JSON.parse(fs2.readFileSync(f, "utf8"));
     if (raw.schemaVersion === 3)
       return raw;
     return migrateOpeneccState(worktreePath);
@@ -70,27 +119,27 @@ function readPlanIndex(worktreePath) {
 }
 function writePlanIndex(worktreePath, index) {
   const f = indexJsonPath(worktreePath);
-  const dir = path.dirname(f);
-  if (!fs.existsSync(dir))
-    fs.mkdirSync(dir, { recursive: true });
+  const dir = path2.dirname(f);
+  if (!fs2.existsSync(dir))
+    fs2.mkdirSync(dir, { recursive: true });
   const tmp = f + ".tmp";
-  fs.writeFileSync(tmp, JSON.stringify(index, null, 2), "utf8");
-  fs.renameSync(tmp, f);
+  fs2.writeFileSync(tmp, JSON.stringify(index, null, 2), "utf8");
+  fs2.renameSync(tmp, f);
   _indexWriteQueue = _indexWriteQueue.then(() => {}).catch(() => {});
 }
 function migrateOpeneccState(worktreePath) {
   try {
     const d = openeccDir(worktreePath);
-    if (!fs.existsSync(d))
+    if (!fs2.existsSync(d))
       return null;
-    const old = fs.readdirSync(d).filter((f) => /^plan-\d+\.yaml$/.test(f));
+    const old = fs2.readdirSync(d).filter((f) => /^plan-\d+\.yaml$/.test(f));
     for (const f of old)
-      fs.unlinkSync(path.join(d, f));
+      fs2.unlinkSync(path2.join(d, f));
     const fresh = {
-      openeccVersion: "0.3",
+      openeccVersion: getOpenEccVersion(),
       schemaVersion: 3,
       projectDir: worktreePath,
-      projectName: path.basename(worktreePath),
+      projectName: path2.basename(worktreePath),
       updatedAt: new Date().toISOString(),
       activePlanId: null,
       plans: [],
@@ -217,10 +266,10 @@ function classifyTaskScope(text) {
 }
 function buildPlanStub(worktreePath) {
   const idx = readPlanIndex(worktreePath) || {
-    openeccVersion: "0.3",
+    openeccVersion: getOpenEccVersion(),
     schemaVersion: 3,
     projectDir: worktreePath,
-    projectName: path.basename(worktreePath),
+    projectName: path2.basename(worktreePath),
     updatedAt: now(),
     activePlanId: null,
     plans: [],
@@ -363,20 +412,20 @@ var PROJECT_MARKERS = [".git", "package.json", "go.mod", "Cargo.toml", "pyprojec
 var INIT_MARKERS = [".opencode", ".openecc"];
 function isValidProjectDir(dir) {
   try {
-    const stat = fs.statSync(dir);
+    const stat = fs2.statSync(dir);
     if (!stat.isDirectory())
       return false;
-    const resolved = path.resolve(dir);
-    if (PROJECT_MARKERS.some((m) => fs.existsSync(path.join(resolved, m))))
+    const resolved = path2.resolve(dir);
+    if (PROJECT_MARKERS.some((m) => fs2.existsSync(path2.join(resolved, m))))
       return true;
-    if (INIT_MARKERS.some((m) => fs.existsSync(path.join(resolved, m))))
+    if (INIT_MARKERS.some((m) => fs2.existsSync(path2.join(resolved, m))))
       return true;
-    const home = os.homedir();
-    if (path.parse(resolved).root !== path.parse(home).root)
+    const home = os2.homedir();
+    if (path2.parse(resolved).root !== path2.parse(home).root)
       return true;
-    const relative2 = path.relative(home, resolved);
-    if (relative2 && !relative2.startsWith("..") && !path.isAbsolute(relative2)) {
-      const segments = relative2.split(path.sep).filter(Boolean);
+    const relative2 = path2.relative(home, resolved);
+    if (relative2 && !relative2.startsWith("..") && !path2.isAbsolute(relative2)) {
+      const segments = relative2.split(path2.sep).filter(Boolean);
       if (segments.length >= 2)
         return true;
     }
@@ -682,15 +731,92 @@ plan_notes:
   }
 }
 
+// src/shell.ts
+import * as os3 from "os";
+var ANTI_PATTERNS = {
+  "git-bash": ["Remove-Item", "Get-ChildItem", "New-Item", "Set-Content", "Get-Content", "Out-File", "Move-Item", "Copy-Item"],
+  pwsh: ["Get-Content", "Set-Content", "Out-File", "Add-Content", "Get-ChildItem", "Select-String", "Remove-Item"],
+  powershell: ["Get-Content", "Set-Content", "Out-File", "Add-Content", "Get-ChildItem", "Select-String", "Remove-Item"],
+  cmd: [],
+  wsl: ["Remove-Item", "Get-ChildItem"],
+  unix: [],
+  unknown: []
+};
+var GUIDANCE = {
+  "git-bash": "You are on Git Bash (MSYS2/MinGW). Use POSIX/bash commands (ls, rm, mkdir, cat). NEVER use PowerShell commands like Remove-Item, Get-ChildItem, Set-Content.",
+  pwsh: "You are on PowerShell 7+ (pwsh). Use PowerShell cmdlets and syntax.",
+  powershell: "You are on Windows PowerShell 5.1 (powershell.exe). Use PowerShell cmdlets and syntax.",
+  cmd: "You are on Windows Command Prompt (CMD). Use cmd.exe syntax.",
+  wsl: "You are on WSL (Windows Subsystem for Linux). Use bash commands.",
+  unix: "You are on a Unix/Linux/macOS shell. Use standard POSIX/bash commands.",
+  unknown: "Shell type could not be determined. Use standard POSIX/bash commands."
+};
+var _cachedShell = null;
+function detectShell() {
+  if (_cachedShell)
+    return _cachedShell;
+  const env = process.env;
+  const platform2 = os3.platform();
+  const isWindows = platform2 === "win32";
+  let shellType;
+  if (env.MSYSTEM) {
+    shellType = "git-bash";
+  } else if (env.PSModulePath && !env.MSYSTEM) {
+    shellType = env.PSEdition === "Core" ? "pwsh" : isWindows ? "powershell" : "unknown";
+  } else if (env.ComSpec?.toLowerCase().includes("cmd.exe") && !env.SHELL?.toLowerCase().includes("bash")) {
+    shellType = "cmd";
+  } else if (env.SHELL) {
+    const shellLower = env.SHELL.toLowerCase();
+    shellType = shellLower.includes("bash") || shellLower.includes("zsh") || shellLower.includes("sh") ? isWindows ? "wsl" : "unix" : "unknown";
+  } else if (isWindows) {
+    shellType = "powershell";
+  } else {
+    shellType = "unix";
+  }
+  const isPowerShell = shellType === "pwsh" || shellType === "powershell";
+  const preferredSyntax = shellType === "git-bash" || shellType === "wsl" || shellType === "unix" ? "bash" : shellType === "pwsh" || shellType === "powershell" ? "powershell" : "cmd";
+  const guidance = GUIDANCE[shellType];
+  const antiPatterns = (shellType === "pwsh" || shellType === "powershell") && platform2 !== "win32" ? [] : ANTI_PATTERNS[shellType];
+  _cachedShell = { shellType, preferredSyntax, isWindows, isPowerShell, antiPatterns, guidance };
+  return _cachedShell;
+}
+
+// src/execution.ts
+var _ctx = {
+  attempt: 0,
+  struggleDetected: false,
+  lastErrorPattern: null,
+  compactionCount: 0
+};
+function getExecutionContext() {
+  return { ..._ctx };
+}
+function incrementAttempt() {
+  _ctx.attempt++;
+}
+function buildExecutionContextBlock() {
+  const ctx = getExecutionContext();
+  const yaml = [
+    "type: execution",
+    `attempt: ${ctx.attempt}`,
+    `struggle_detected: ${ctx.struggleDetected}`,
+    `compaction_count: ${ctx.compactionCount}`
+  ].join(`
+`);
+  return `<structured type="execution">
+${yaml}
+</structured>`;
+}
+
 // src/plugin.ts
-var __dirname2 = path2.dirname(fileURLToPath(import.meta.url));
-var skillsDir = path2.resolve(__dirname2, "..", "skills");
-var agentsDir = path2.resolve(__dirname2, "..", "prompts", "agents");
-var commandsDir = path2.resolve(__dirname2, "..", "commands");
-var agentsMDPath = path2.resolve(__dirname2, "..", "..", "AGENTS.md");
+var __dirname3 = path3.dirname(fileURLToPath2(import.meta.url));
+var skillsDir = path3.resolve(__dirname3, "..", "skills");
+var agentsDir = path3.resolve(__dirname3, "..", "prompts", "agents");
+var commandsDir = path3.resolve(__dirname3, "..", "commands");
+var agentsMDPath = path3.resolve(__dirname3, "..", "..", "AGENTS.md");
 function readFileSafe(filePath) {
   try {
-    return fs2.readFileSync(filePath, "utf8");
+    return fs3.readFileSync(filePath, "utf8");
   } catch {
     return "";
   }
@@ -699,27 +825,27 @@ function stripYamlFrontmatter(content) {
   return content.replace(/^---[\s\S]*?---\n/, "");
 }
 function detectProject(cwd) {
-  let projectName = path2.basename(cwd);
+  let projectName = path3.basename(cwd);
   try {
-    const pkg = JSON.parse(fs2.readFileSync(path2.join(cwd, "package.json"), "utf8"));
+    const pkg = JSON.parse(fs3.readFileSync(path3.join(cwd, "package.json"), "utf8"));
     if (pkg.name)
       projectName = pkg.name;
   } catch {}
   const languages = [];
-  if (fs2.existsSync(path2.join(cwd, "tsconfig.json")))
+  if (fs3.existsSync(path3.join(cwd, "tsconfig.json")))
     languages.push("typescript");
-  if (fs2.existsSync(path2.join(cwd, "go.mod")))
+  if (fs3.existsSync(path3.join(cwd, "go.mod")))
     languages.push("go");
-  if (fs2.existsSync(path2.join(cwd, "Cargo.toml")))
+  if (fs3.existsSync(path3.join(cwd, "Cargo.toml")))
     languages.push("rust");
-  if (fs2.existsSync(path2.join(cwd, "pyproject.toml")))
+  if (fs3.existsSync(path3.join(cwd, "pyproject.toml")))
     languages.push("python");
-  if (fs2.existsSync(path2.join(cwd, "package.json")))
+  if (fs3.existsSync(path3.join(cwd, "package.json")))
     languages.push("javascript");
   const lockfiles = { "bun.lock": "bun", "bun.lockb": "bun", "pnpm-lock.yaml": "pnpm", "yarn.lock": "yarn", "package-lock.json": "npm" };
   let packageManager = "npm";
   for (const [lock, name] of Object.entries(lockfiles)) {
-    if (fs2.existsSync(path2.join(cwd, lock))) {
+    if (fs3.existsSync(path3.join(cwd, lock))) {
       packageManager = name;
       break;
     }
@@ -935,7 +1061,7 @@ var OpenECCPlugin = async ({ client, directory, worktree }) => {
       config.agent = config.agent || {};
       for (const agent of AGENTS) {
         if (!config.agent[agent.name]) {
-          const prompt = readFileSafe(path2.join(agentsDir, `${agent.name}.txt`));
+          const prompt = readFileSafe(path3.join(agentsDir, `${agent.name}.txt`));
           if (prompt) {
             const agentConfig = { description: agent.desc, mode: "subagent", prompt };
             if (agent.permission)
@@ -947,7 +1073,7 @@ var OpenECCPlugin = async ({ client, directory, worktree }) => {
       config.command = config.command || {};
       for (const cmd of COMMANDS) {
         if (!config.command[cmd.name]) {
-          const templateContent = readFileSafe(path2.join(commandsDir, `${cmd.name}.md`));
+          const templateContent = readFileSafe(path3.join(commandsDir, `${cmd.name}.md`));
           const cleanTemplate = stripYamlFrontmatter(templateContent);
           if (cleanTemplate) {
             config.command[cmd.name] = { description: cmd.desc, template: `${cleanTemplate}
@@ -960,27 +1086,50 @@ $ARGUMENTS`, ...cmd.agent ? { agent: cmd.agent } : {}, ...cmd.subtask ? { subtas
     "experimental.chat.system.transform": async (_input, output) => {
       if (!projectProfile)
         projectProfile = detectProject(worktreePath);
-      const soulPath = path2.join(skillsDir, "soul", "SKILL.md");
+      const pkg = getPackageInfo();
+      const shell = detectShell();
+      const soulPath = path3.join(skillsDir, "soul", "SKILL.md");
       const soulContent = readFileSafe(soulPath);
       const cleanSoul = stripYamlFrontmatter(soulContent);
-      const systemBootstrap = `<EXTREMELY_IMPORTANT>
+      const identityBlock = `<EXTREMELY_IMPORTANT>
+I am OpenECC, your engineering workflow layer.
+
+I know my version (\`${pkg.version}\`), my install path (\`${pkg.root}\`), and my job: route work to specialists, gate plans until approved, track goals, and never claim done without verification. I report to you directly with synthesized results. Everything else is delegated.
+
 You have a soul \u2014 the principles below are always active. They are ALREADY LOADED.
 
 ${cleanSoul}
-</EXTREMELY_IMPORTANT>
-
-${DELEGATOR_ROLE}
-
-${DELEGATION_ENFORCEMENT}
-
-${buildToolAccessBlock()}
-
-${COMPLETION_CONTRACT}
-
-${buildProjectProfileSection(projectProfile)}`;
+</EXTREMELY_IMPORTANT>`;
+      const runtimeBlock = `<structured type="runtime">
+type: runtime
+openecc_version: ${pkg.version}
+package_root: ${pkg.root}
+skills_directory: ${pkg.skillsDir}
+cache_root: ${pkg.cacheRoot}
+</structured>`;
+      const shellBlock = `<structured type="shell">
+type: shell
+detected: ${shell.shellType}
+preferred_syntax: ${shell.preferredSyntax}
+anti_patterns: [${shell.antiPatterns.join(", ")}]
+guidance: ${shell.guidance}
+</structured>`;
       const systemMessages = output.systemMessages || [];
       if (!systemMessages.some((p) => p.text?.includes("EXTREMELY_IMPORTANT"))) {
-        systemMessages.unshift({ type: "text", text: systemBootstrap });
+        const fullBootstrap = [
+          identityBlock,
+          runtimeBlock,
+          shellBlock,
+          buildExecutionContextBlock(),
+          DELEGATOR_ROLE,
+          DELEGATION_ENFORCEMENT,
+          buildToolAccessBlock(),
+          COMPLETION_CONTRACT,
+          buildProjectProfileSection(projectProfile)
+        ].join(`
+
+`);
+        systemMessages.unshift({ type: "text", text: fullBootstrap });
         output.systemMessages = systemMessages;
       }
       try {
@@ -1021,6 +1170,7 @@ turns: ${gs.turnCount}
       const userText = parts.filter((p) => p.type === "text" && typeof p.text === "string").map((p) => p.text).join(" ");
       if (!userText || userText.length >= 2000)
         return;
+      incrementAttempt();
       try {
         const intent = classifyIntent(userText);
         if (intent.isWork && isValidProjectDir(worktreePath)) {
@@ -1062,8 +1212,10 @@ ${firstText.text}`;
       }
     },
     "experimental.session.compacting": async (_input, output) => {
+      const pkg = getPackageInfo();
       output.context.push("# OpenECC Context (preserve across compaction)");
-      output.context.push("", "## OpenECC Delegator");
+      output.context.push("", `## OpenECC v${pkg.version}`);
+      output.context.push(`- Package root: ${pkg.root}`);
       output.context.push("- Primary role: delegate to subagents, synthesize results, verify before claiming");
       output.context.push("- Soul: Think Before Coding, Simplicity First, Surgical Changes, Goal-Driven Execution");
       output.context.push("- Route by task type: planning, review, build-fix, TDD, docs, language-specific");
@@ -1094,7 +1246,8 @@ ${firstText.text}`;
         editedFiles.add(filePath);
     },
     "session.created": async () => {
-      await client.app.log({ body: { service: "openecc", level: "info", message: "Session started \u2014 OpenECC active" } });
+      const pkg = getPackageInfo();
+      await client.app.log({ body: { service: "openecc", level: "info", message: `Session started \u2014 OpenECC v${pkg.version} active` } });
     },
     "session.deleted": async () => {
       editedFiles.clear();
