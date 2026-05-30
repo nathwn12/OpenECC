@@ -833,56 +833,86 @@ var COMPLETION_CONTRACT = `### Before responding
 2. Did you verify results (not assume)?
 3. Is the response concise and synthesized?
 When done: place \`---\` followed by **Status:** \u2705 Done | \uD83D\uDEA7 Blocked | \uD83D\uDD04 In Progress`;
-var AGENTS = [
-  { name: "planner", desc: "Expert planning specialist for complex features and refactoring.", permission: { edit: "deny", write: "deny", task: "deny" } },
-  { name: "architect", desc: "Software architecture specialist for system design and technical decisions.", permission: { edit: "deny", write: "deny", task: "deny" } },
-  { name: "code-reviewer", desc: "Expert code review specialist. Reviews code for quality, security, maintainability.", permission: { edit: "deny", write: "deny", task: "deny" } },
-  { name: "security-reviewer", desc: "Security vulnerability detection and remediation.", permission: { task: "deny" } },
-  { name: "tdd-guide", desc: "Test-Driven Development specialist. 80%+ test coverage.", permission: { task: "deny" } },
-  { name: "build-error-resolver", desc: "Build and TypeScript error resolution. Minimal diffs.", permission: { task: "deny" } },
-  { name: "database-reviewer", desc: "PostgreSQL query optimization, schema design, security.", permission: { task: "deny" } },
-  { name: "doc-updater", desc: "Documentation and codemap maintenance.", permission: { task: "deny" } },
-  { name: "docs-lookup", desc: "Library/API reference research via web fetch.", permission: { edit: "deny", write: "deny", bash: "deny", task: "deny" } },
-  { name: "e2e-runner", desc: "Playwright E2E tests, Page Object Model, CI/CD.", permission: { task: "deny" } },
-  { name: "harness-optimizer", desc: "Analyze and improve local agent harness config.", permission: { task: "deny" } },
-  { name: "loop-operator", desc: "Autonomous loop monitoring, stall detection, safe intervention.", permission: { task: "deny" } },
-  { name: "refactor-cleaner", desc: "Dead code removal, consolidation, duplicates.", permission: { task: "deny" } },
-  { name: "search-agent", desc: "Low-cost search specialist. grep/glob/webfetch/websearch.", permission: { edit: "deny", write: "deny", bash: "deny", task: "deny" } },
-  { name: "plan-ceo-reviewer", desc: "Business/product perspective plan review.", permission: { edit: "deny", write: "deny", task: "deny" } },
-  { name: "plan-eng-reviewer", desc: "Engineering/architecture plan review.", permission: { edit: "deny", write: "deny", task: "deny" } },
-  { name: "plan-design-reviewer", desc: "UX/design perspective plan review.", permission: { edit: "deny", write: "deny", task: "deny" } },
-  { name: "plan-devex-reviewer", desc: "Developer experience plan review.", permission: { edit: "deny", write: "deny", task: "deny" } }
-];
-var COMMANDS = [
-  { name: "plan", desc: "Create a detailed implementation plan", agent: "planner", subtask: true },
-  { name: "code-review", desc: "Review code for quality, security, maintainability", agent: "code-reviewer", subtask: true },
-  { name: "security", desc: "Run comprehensive security review", agent: "security-reviewer", subtask: true },
-  { name: "security-scan", desc: "Run OWASP + STRIDE security audit", agent: "security-reviewer", subtask: true },
-  { name: "tdd", desc: "Enforce TDD with 80%+ coverage", agent: "tdd-guide", subtask: true },
-  { name: "build-fix", desc: "Fix build/type errors", agent: "build-error-resolver", subtask: true },
-  { name: "e2e", desc: "Generate and run Playwright E2E tests", agent: "e2e-runner", subtask: true },
-  { name: "orchestrate", desc: "Orchestrate multiple agents for complex tasks", agent: "planner", subtask: true },
-  { name: "refactor-clean", desc: "Remove dead code and consolidate duplicates", agent: "refactor-cleaner", subtask: true },
-  { name: "update-docs", desc: "Update documentation", agent: "doc-updater", subtask: true },
-  { name: "update-codemaps", desc: "Update codemaps", agent: "doc-updater", subtask: true },
-  { name: "test-coverage", desc: "Analyze test coverage", agent: "tdd-guide", subtask: true },
-  { name: "checkpoint", desc: "Save verification state and progress" },
-  { name: "eval", desc: "Run evaluation against criteria" },
-  { name: "evolve", desc: "Cluster instincts into skills" },
-  { name: "harness-audit", desc: "Audit harness configuration and health" },
-  { name: "instinct-status", desc: "View learned instincts" },
-  { name: "instinct-import", desc: "Import instincts" },
-  { name: "instinct-export", desc: "Export instincts" },
-  { name: "learn", desc: "Extract patterns and learnings from session" },
-  { name: "loop-start", desc: "Start an autonomous agent loop" },
-  { name: "loop-status", desc: "Check loop status and iteration metrics" },
-  { name: "projects", desc: "List known projects and instinct stats" },
-  { name: "promote", desc: "Promote project instincts to global scope" },
-  { name: "quality-gate", desc: "Run quality gates: build, types, lint, tests" },
-  { name: "setup-pm", desc: "Configure package manager" },
-  { name: "skill-create", desc: "Generate skills from git history" },
-  { name: "verify", desc: "Run verification loop" }
-];
+function inferAgentPermission(name) {
+  if (name === "search-agent" || name === "docs-lookup") {
+    return { edit: "deny", write: "deny", bash: "deny", task: "deny" };
+  }
+  if (name === "code-reviewer" || name === "planner" || name === "architect" || name.startsWith("plan-") && name.endsWith("-reviewer")) {
+    return { edit: "deny", write: "deny", task: "deny" };
+  }
+  return;
+}
+function inferAgentDesc(name, prompt) {
+  const firstLine = prompt.split(`
+`)[0]?.trim() || "";
+  if (firstLine) {
+    return firstLine.replace(/^You are an?\s+/i, "").replace(/\.$/, "");
+  }
+  return name.replace(/-/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+}
+function scanAgents(dir) {
+  const results = [];
+  try {
+    const entries = fs3.readdirSync(dir, { withFileTypes: true });
+    for (const entry of entries) {
+      if (!entry.isFile() || !entry.name.endsWith(".txt"))
+        continue;
+      const name = entry.name.slice(0, -4);
+      const prompt = readFileSafe(path3.join(dir, entry.name));
+      if (!prompt)
+        continue;
+      results.push({ name, desc: inferAgentDesc(name, prompt), permission: inferAgentPermission(name), prompt });
+    }
+  } catch {}
+  return results;
+}
+function parseCommandFrontmatter(content) {
+  const match = content.match(/^---\n([\s\S]*?)\n---/);
+  if (!match)
+    return {};
+  const result = {};
+  for (const line of match[1].split(`
+`)) {
+    const kv = line.match(/^(\w+):\s*(.+)$/);
+    if (kv) {
+      let value = kv[2].trim();
+      if (value === "true")
+        value = true;
+      else if (value === "false")
+        value = false;
+      else if (value.startsWith('"') && value.endsWith('"'))
+        value = value.slice(1, -1);
+      result[kv[1]] = value;
+    }
+  }
+  return result;
+}
+function scanCommands(dir) {
+  const results = [];
+  try {
+    const entries = fs3.readdirSync(dir, { withFileTypes: true });
+    for (const entry of entries) {
+      if (!entry.isFile() || !entry.name.endsWith(".md"))
+        continue;
+      const name = entry.name.slice(0, -3);
+      const content = readFileSafe(path3.join(dir, entry.name));
+      if (!content)
+        continue;
+      const fm = parseCommandFrontmatter(content);
+      const template = stripYamlFrontmatter(content);
+      if (!template)
+        continue;
+      results.push({
+        name,
+        desc: fm.description || name.replace(/-/g, " "),
+        agent: fm.agent,
+        subtask: fm.subtask,
+        template
+      });
+    }
+  } catch {}
+  return results;
+}
 var OpenECCPlugin = async ({ client, directory, worktree }) => {
   const worktreePath = worktree || directory;
   let projectProfile = null;
@@ -969,28 +999,28 @@ var OpenECCPlugin = async ({ client, directory, worktree }) => {
       config.instructions = config.instructions || [];
       if (!config.instructions.some((i) => i === agentsMDPath))
         config.instructions.push(agentsMDPath);
+      const discoveredAgents = scanAgents(agentsDir);
       config.agent = config.agent || {};
-      for (const agent of AGENTS) {
+      for (const agent of discoveredAgents) {
         if (!config.agent[agent.name]) {
-          const prompt = readFileSafe(path3.join(agentsDir, `${agent.name}.txt`));
-          if (prompt) {
-            const agentConfig = { description: agent.desc, mode: "subagent", prompt };
-            if (agent.permission)
-              agentConfig.permission = agent.permission;
-            config.agent[agent.name] = agentConfig;
-          }
+          const agentConfig = { description: agent.desc, mode: "subagent", prompt: agent.prompt };
+          if (agent.permission)
+            agentConfig.permission = agent.permission;
+          config.agent[agent.name] = agentConfig;
         }
       }
+      const discoveredCommands = scanCommands(commandsDir);
       config.command = config.command || {};
-      for (const cmd of COMMANDS) {
+      for (const cmd of discoveredCommands) {
         if (!config.command[cmd.name]) {
-          const templateContent = readFileSafe(path3.join(commandsDir, `${cmd.name}.md`));
-          const cleanTemplate = stripYamlFrontmatter(templateContent);
-          if (cleanTemplate) {
-            config.command[cmd.name] = { description: cmd.desc, template: `${cleanTemplate}
+          config.command[cmd.name] = {
+            description: cmd.desc,
+            template: `${cmd.template}
 
-$ARGUMENTS`, ...cmd.agent ? { agent: cmd.agent } : {}, ...cmd.subtask ? { subtask: true } : {} };
-          }
+$ARGUMENTS`,
+            ...cmd.agent ? { agent: cmd.agent } : {},
+            ...cmd.subtask ? { subtask: true } : {}
+          };
         }
       }
     },
