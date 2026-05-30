@@ -8,7 +8,7 @@ import {
   updatePlanStatus, type PlanIndex, type PlanIndexEntry,
 } from "./plan-gate"
 import { getPackageInfo, getOpenEccVersion } from "./identity"
-import { detectShell } from "./shell"
+
 import { incrementAttempt, buildExecutionContextBlock } from "./execution"
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -300,7 +300,6 @@ export const OpenECCPlugin: Plugin = async ({ client, directory, worktree }) => 
       if (!projectProfile) projectProfile = detectProject(worktreePath)
 
       const pkg = getPackageInfo()
-      const shell = detectShell()
 
       const soulPath = path.join(skillsDir, "soul", "SKILL.md")
       const soulContent = readFileSafe(soulPath)
@@ -321,15 +320,6 @@ type: runtime
 openecc_version: ${pkg.version}
 package_root: ${pkg.root}
 skills_directory: ${pkg.skillsDir}
-cache_root: ${pkg.cacheRoot}
-</structured>`
-
-      const shellBlock = `<structured type="shell">
-type: shell
-detected: ${shell.shellType}
-preferred_syntax: ${shell.preferredSyntax}
-anti_patterns: [${shell.antiPatterns.join(", ")}]
-guidance: ${shell.guidance}
 </structured>`
 
       const systemMessages = output.systemMessages || []
@@ -337,7 +327,6 @@ guidance: ${shell.guidance}
         const fullBootstrap = [
           identityBlock,
           runtimeBlock,
-          shellBlock,
           buildExecutionContextBlock(),
           DELEGATOR_ROLE,
           DELEGATION_ENFORCEMENT,
@@ -398,9 +387,7 @@ turns: ${gs.turnCount}
         const intent = classifyIntent(userText)
         if (intent.isWork && isValidProjectDir(worktreePath)) {
           const scope = classifyTaskScope(userText)
-          if (scope === "trivial") {
-            // No plan needed for trivial tasks
-          } else {
+          if (scope !== "trivial") {
             const existingPlan = getActivePlan(worktreePath)
             if (!existingPlan || existingPlan.status === "done" || existingPlan.status === "abandoned" || existingPlan.status === "blocked") {
               const result = scope === "complex"

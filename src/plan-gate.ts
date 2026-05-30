@@ -86,10 +86,6 @@ export interface PlanIndex {
   updatedAt: string
   activePlanId: string | null
   plans: PlanIndexEntry[]
-  retention?: {
-    maxAgeDays: number
-    terminalStatuses: string[]
-  }
 }
 
 export interface ActivePlanResult {
@@ -99,10 +95,6 @@ export interface ActivePlanResult {
 }
 
 export type TaskScope = "trivial" | "lightweight" | "complex"
-
-// ── Write Queue ────────────────────────────────────────────────────────────
-
-let _indexWriteQueue: Promise<void> = Promise.resolve()
 
 // ── Paths ──────────────────────────────────────────────────────────────────
 
@@ -172,7 +164,6 @@ export function writePlanIndex(worktreePath: string, index: PlanIndex): void {
   const tmp = f + ".tmp"
   fs.writeFileSync(tmp, JSON.stringify(index, null, 2), "utf8")
   fs.renameSync(tmp, f)
-  _indexWriteQueue = _indexWriteQueue.then(() => {}).catch(() => {})
 }
 
 // ── Migration ──────────────────────────────────────────────────────────────
@@ -195,7 +186,7 @@ export function migrateOpeneccState(worktreePath: string): PlanIndex | null {
       updatedAt: new Date().toISOString(),
       activePlanId: null,
       plans: [],
-      retention: { maxAgeDays: 7, terminalStatuses: ["done", "abandoned"] },
+
     }
     writePlanIndex(worktreePath, fresh)
     return fresh
@@ -336,7 +327,6 @@ function buildPlanStub(worktreePath: string): { idx: PlanIndex } {
     updatedAt: now(),
     activePlanId: null,
     plans: [],
-    retention: { maxAgeDays: 7, terminalStatuses: ["done", "abandoned"] },
   }
   return { idx }
 }
@@ -561,11 +551,6 @@ export function isValidProjectDir(dir: string): boolean {
 
 // ── Intent Classification ──────────────────────────────────────────────────
 
-const STOPWORDS = new Set([
-  "a", "an", "the", "in", "on", "at", "to", "for", "of", "with",
-  "by", "and", "or", "is", "it", "be", "this", "that",
-])
-
 const IMPLEMENT_WORDS = new Set([
   "implement", "build", "add", "fix", "change", "create", "refactor",
   "write", "edit", "update", "remove", "delete", "broken",
@@ -616,7 +601,6 @@ main_context_only:
     - skill
     - read
     - question
-    - todowrite
   description: "Spawn subagents, load skills, read state files, ask user. NO source mutations."
 subagent_only:
   allowed:

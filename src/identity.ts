@@ -1,5 +1,4 @@
 import * as fs from "node:fs"
-import * as os from "node:os"
 import * as path from "node:path"
 import { fileURLToPath } from "node:url"
 
@@ -12,7 +11,6 @@ export interface PackageInfo {
   version: string
   root: string
   skillsDir: string
-  cacheRoot: string
 }
 
 function findPackageRoot(fromDir: string): string | null {
@@ -47,7 +45,6 @@ export function getPackageInfo(): PackageInfo {
   const root = findPackageRoot(__dirname) ?? findPackageRoot(path.resolve(__dirname, "..")) ?? path.resolve(__dirname, "..")
   const version = getOpenEccVersion()
   const skillsDir = path.join(root, ".opencode", "skills")
-  const cacheRoot = path.join(os.homedir(), ".cache", "opencode", "packages")
-  _pkgInfo = { version, root, skillsDir, cacheRoot }
+  _pkgInfo = { version, root, skillsDir }
   return _pkgInfo
 }

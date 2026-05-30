@@ -6,12 +6,11 @@ import { fileURLToPath as fileURLToPath2 } from "url";
 
 // src/plan-gate.ts
 import * as fs2 from "fs";
-import * as os2 from "os";
+import * as os from "os";
 import * as path2 from "path";
 
 // src/identity.ts
 import * as fs from "fs";
-import * as os from "os";
 import * as path from "path";
 import { fileURLToPath } from "url";
 var __dirname2 = path.dirname(fileURLToPath(import.meta.url));
@@ -51,8 +50,7 @@ function getPackageInfo() {
   const root = findPackageRoot(__dirname2) ?? findPackageRoot(path.resolve(__dirname2, "..")) ?? path.resolve(__dirname2, "..");
   const version = getOpenEccVersion();
   const skillsDir = path.join(root, ".opencode", "skills");
-  const cacheRoot = path.join(os.homedir(), ".cache", "opencode", "packages");
-  _pkgInfo = { version, root, skillsDir, cacheRoot };
+  _pkgInfo = { version, root, skillsDir };
   return _pkgInfo;
 }
 
@@ -73,7 +71,6 @@ function validatePlanTransition(current, next) {
     return false;
   return allowed.includes(next);
 }
-var _indexWriteQueue = Promise.resolve();
 function openeccDir(worktreePath) {
   return path2.join(worktreePath, ".openecc");
 }
@@ -125,7 +122,6 @@ function writePlanIndex(worktreePath, index) {
   const tmp = f + ".tmp";
   fs2.writeFileSync(tmp, JSON.stringify(index, null, 2), "utf8");
   fs2.renameSync(tmp, f);
-  _indexWriteQueue = _indexWriteQueue.then(() => {}).catch(() => {});
 }
 function migrateOpeneccState(worktreePath) {
   try {
@@ -142,8 +138,7 @@ function migrateOpeneccState(worktreePath) {
       projectName: path2.basename(worktreePath),
       updatedAt: new Date().toISOString(),
       activePlanId: null,
-      plans: [],
-      retention: { maxAgeDays: 7, terminalStatuses: ["done", "abandoned"] }
+      plans: []
     };
     writePlanIndex(worktreePath, fresh);
     return fresh;
@@ -272,8 +267,7 @@ function buildPlanStub(worktreePath) {
     projectName: path2.basename(worktreePath),
     updatedAt: now(),
     activePlanId: null,
-    plans: [],
-    retention: { maxAgeDays: 7, terminalStatuses: ["done", "abandoned"] }
+    plans: []
   };
   return { idx };
 }
@@ -420,7 +414,7 @@ function isValidProjectDir(dir) {
       return true;
     if (INIT_MARKERS.some((m) => fs2.existsSync(path2.join(resolved, m))))
       return true;
-    const home = os2.homedir();
+    const home = os.homedir();
     if (path2.parse(resolved).root !== path2.parse(home).root)
       return true;
     const relative2 = path2.relative(home, resolved);
@@ -434,26 +428,6 @@ function isValidProjectDir(dir) {
     return false;
   }
 }
-var STOPWORDS = new Set([
-  "a",
-  "an",
-  "the",
-  "in",
-  "on",
-  "at",
-  "to",
-  "for",
-  "of",
-  "with",
-  "by",
-  "and",
-  "or",
-  "is",
-  "it",
-  "be",
-  "this",
-  "that"
-]);
 var IMPLEMENT_WORDS = new Set([
   "implement",
   "build",
@@ -513,7 +487,6 @@ main_context_only:
     - skill
     - read
     - question
-    - todowrite
   description: "Spawn subagents, load skills, read state files, ask user. NO source mutations."
 subagent_only:
   allowed:
@@ -729,56 +702,6 @@ plan_notes:
   } catch {
     return null;
   }
-}
-
-// src/shell.ts
-import * as os3 from "os";
-var ANTI_PATTERNS = {
-  "git-bash": ["Remove-Item", "Get-ChildItem", "New-Item", "Set-Content", "Get-Content", "Out-File", "Move-Item", "Copy-Item"],
-  pwsh: ["Get-Content", "Set-Content", "Out-File", "Add-Content", "Get-ChildItem", "Select-String", "Remove-Item"],
-  powershell: ["Get-Content", "Set-Content", "Out-File", "Add-Content", "Get-ChildItem", "Select-String", "Remove-Item"],
-  cmd: [],
-  wsl: ["Remove-Item", "Get-ChildItem"],
-  unix: [],
-  unknown: []
-};
-var GUIDANCE = {
-  "git-bash": "You are on Git Bash (MSYS2/MinGW). Use POSIX/bash commands (ls, rm, mkdir, cat). NEVER use PowerShell commands like Remove-Item, Get-ChildItem, Set-Content.",
-  pwsh: "You are on PowerShell 7+ (pwsh). Use PowerShell cmdlets and syntax.",
-  powershell: "You are on Windows PowerShell 5.1 (powershell.exe). Use PowerShell cmdlets and syntax.",
-  cmd: "You are on Windows Command Prompt (CMD). Use cmd.exe syntax.",
-  wsl: "You are on WSL (Windows Subsystem for Linux). Use bash commands.",
-  unix: "You are on a Unix/Linux/macOS shell. Use standard POSIX/bash commands.",
-  unknown: "Shell type could not be determined. Use standard POSIX/bash commands."
-};
-var _cachedShell = null;
-function detectShell() {
-  if (_cachedShell)
-    return _cachedShell;
-  const env = process.env;
-  const platform2 = os3.platform();
-  const isWindows = platform2 === "win32";
-  let shellType;
-  if (env.MSYSTEM) {
-    shellType = "git-bash";
-  } else if (env.PSModulePath && !env.MSYSTEM) {
-    shellType = env.PSEdition === "Core" ? "pwsh" : isWindows ? "powershell" : "unknown";
-  } else if (env.ComSpec?.toLowerCase().includes("cmd.exe") && !env.SHELL?.toLowerCase().includes("bash")) {
-    shellType = "cmd";
-  } else if (env.SHELL) {
-    const shellLower = env.SHELL.toLowerCase();
-    shellType = shellLower.includes("bash") || shellLower.includes("zsh") || shellLower.includes("sh") ? isWindows ? "wsl" : "unix" : "unknown";
-  } else if (isWindows) {
-    shellType = "powershell";
-  } else {
-    shellType = "unix";
-  }
-  const isPowerShell = shellType === "pwsh" || shellType === "powershell";
-  const preferredSyntax = shellType === "git-bash" || shellType === "wsl" || shellType === "unix" ? "bash" : shellType === "pwsh" || shellType === "powershell" ? "powershell" : "cmd";
-  const guidance = GUIDANCE[shellType];
-  const antiPatterns = (shellType === "pwsh" || shellType === "powershell") && platform2 !== "win32" ? [] : ANTI_PATTERNS[shellType];
-  _cachedShell = { shellType, preferredSyntax, isWindows, isPowerShell, antiPatterns, guidance };
-  return _cachedShell;
 }
 
 // src/execution.ts
@@ -1087,7 +1010,6 @@ $ARGUMENTS`, ...cmd.agent ? { agent: cmd.agent } : {}, ...cmd.subtask ? { subtas
       if (!projectProfile)
         projectProfile = detectProject(worktreePath);
       const pkg = getPackageInfo();
-      const shell = detectShell();
       const soulPath = path3.join(skillsDir, "soul", "SKILL.md");
       const soulContent = readFileSafe(soulPath);
       const cleanSoul = stripYamlFrontmatter(soulContent);
@@ -1105,21 +1027,12 @@ type: runtime
 openecc_version: ${pkg.version}
 package_root: ${pkg.root}
 skills_directory: ${pkg.skillsDir}
-cache_root: ${pkg.cacheRoot}
-</structured>`;
-      const shellBlock = `<structured type="shell">
-type: shell
-detected: ${shell.shellType}
-preferred_syntax: ${shell.preferredSyntax}
-anti_patterns: [${shell.antiPatterns.join(", ")}]
-guidance: ${shell.guidance}
 </structured>`;
       const systemMessages = output.systemMessages || [];
       if (!systemMessages.some((p) => p.text?.includes("EXTREMELY_IMPORTANT"))) {
         const fullBootstrap = [
           identityBlock,
           runtimeBlock,
-          shellBlock,
           buildExecutionContextBlock(),
           DELEGATOR_ROLE,
           DELEGATION_ENFORCEMENT,
@@ -1175,7 +1088,7 @@ turns: ${gs.turnCount}
         const intent = classifyIntent(userText);
         if (intent.isWork && isValidProjectDir(worktreePath)) {
           const scope = classifyTaskScope(userText);
-          if (scope === "trivial") {} else {
+          if (scope !== "trivial") {
             const existingPlan = getActivePlan(worktreePath);
             if (!existingPlan || existingPlan.status === "done" || existingPlan.status === "abandoned" || existingPlan.status === "blocked") {
               const result = scope === "complex" ? createPlan(worktreePath, { summary: userText, status: "draft" }) : createBuiltinPlan(worktreePath, userText, "auto");
