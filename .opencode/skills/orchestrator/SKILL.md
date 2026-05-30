@@ -18,7 +18,7 @@ version: 1.0
 
 Every implementation request is gated:
 
-1. **No active plan** → Block. User must create `.openecc/plan-NNN.yaml` and register in `index.json`
+1. **No active plan** → Block. User must create `.opencode/plans/plan-NNN.yaml` and register in `index.json`
 2. **Plan not approved** → Block. Must transition: draft → reviewed → approved
 3. **Plan blocked** → Block. Resolve blocker or create iteration
 4. **Plan done/abandoned** → Block. Clear activePlanId or create new plan
@@ -36,7 +36,7 @@ Lightweight requests (≤20 tokens, no architecture keywords) auto-create a plan
 MAIN CONTEXT ONLY (TALK + DELEGATE):
   - task        → spawn subagents
   - skill       → load skills
-  - read        → .openecc/ state files only
+  - read        → .opencode/ state files only
   - question    → ask user
   - todowrite   → track progress
 
