@@ -56,9 +56,7 @@ function getPackageInfo() {
 
 // src/plan-gate.ts
 var VALID_TRANSITIONS = {
-  draft: ["reviewed", "abandoned"],
-  reviewed: ["ready", "approved", "draft", "abandoned"],
-  ready: ["in_progress", "abandoned"],
+  draft: ["approved", "abandoned"],
   approved: ["in_progress", "abandoned"],
   in_progress: ["done", "blocked", "abandoned"],
   blocked: ["draft", "abandoned"],
@@ -71,14 +69,17 @@ function validatePlanTransition(current, next) {
     return false;
   return allowed.includes(next);
 }
-function openeccDir(worktreePath) {
-  return path2.join(worktreePath, ".openecc");
+function stateDir(worktreePath) {
+  return path2.join(worktreePath, ".opencode");
 }
 function indexJsonPath(worktreePath) {
-  return path2.join(openeccDir(worktreePath), "index.json");
+  return path2.join(stateDir(worktreePath), "index.json");
 }
 function planYamlPath(worktreePath, planId) {
-  return path2.join(openeccDir(worktreePath), `${planId}.yaml`);
+  return path2.join(plansDirPath(worktreePath), `${planId}.yaml`);
+}
+function plansDirPath(worktreePath) {
+  return path2.join(stateDir(worktreePath), "plans");
 }
 function readPlanFile(worktreePath, planId) {
   try {
@@ -109,6 +110,11 @@ function readPlanIndex(worktreePath) {
     const raw = JSON.parse(fs2.readFileSync(f, "utf8"));
     if (raw.schemaVersion === 3)
       return raw;
+    if (raw.schemaVersion === 1) {
+      raw.schemaVersion = 3;
+      writePlanIndex(worktreePath, raw);
+      return raw;
+    }
     return migrateOpeneccState(worktreePath);
   } catch {
     return null;
@@ -124,27 +130,60 @@ function writePlanIndex(worktreePath, index) {
   fs2.renameSync(tmp, f);
 }
 function migrateOpeneccState(worktreePath) {
-  try {
-    const d = openeccDir(worktreePath);
-    if (!fs2.existsSync(d))
-      return null;
-    const old = fs2.readdirSync(d).filter((f) => /^plan-\d+\.yaml$/.test(f));
-    for (const f of old)
-      fs2.unlinkSync(path2.join(d, f));
-    const fresh = {
-      openeccVersion: getOpenEccVersion(),
-      schemaVersion: 3,
-      projectDir: worktreePath,
-      projectName: path2.basename(worktreePath),
-      updatedAt: new Date().toISOString(),
-      activePlanId: null,
-      plans: []
-    };
-    writePlanIndex(worktreePath, fresh);
-    return fresh;
-  } catch {
+  const legacy = path2.join(worktreePath, ".openecc");
+  if (!fs2.existsSync(legacy))
     return null;
+  const out = stateDir(worktreePath);
+  const old = fs2.readdirSync(legacy).filter((f) => /^plan-\d+\.yaml$/.test(f));
+  const plansDir = plansDirPath(worktreePath);
+  if (!fs2.existsSync(plansDir))
+    fs2.mkdirSync(plansDir, { recursive: true });
+  for (const f of old) {
+    try {
+      fs2.cpSync(path2.join(legacy, f), path2.join(plansDir, f), { force: true });
+    } catch {}
   }
+  const oldIndex = path2.join(legacy, "index.json");
+  if (fs2.existsSync(oldIndex)) {
+    try {
+      const raw = JSON.parse(fs2.readFileSync(oldIndex, "utf8"));
+      const migrated = {
+        openeccVersion: getOpenEccVersion(),
+        schemaVersion: 3,
+        projectDir: worktreePath,
+        projectName: path2.basename(worktreePath),
+        updatedAt: new Date().toISOString(),
+        activePlanId: raw.activePlanId ?? null,
+        plans: (raw.plans || []).map((p) => ({
+          id: String(p.id || ""),
+          status: p.status || "draft",
+          createdAt: String(p.createdAt || new Date().toISOString()),
+          updatedAt: String(p.updatedAt || new Date().toISOString()),
+          parent: p.parent ? String(p.parent) : undefined,
+          summary: String(p.summary || ""),
+          total: Number(p.total || 0),
+          completed: Number(p.completed || 0),
+          blocked: Number(p.blocked || 0),
+          file: p.file ? String(p.file) : "",
+          plannerMode: p.plannerMode,
+          plannerSource: p.plannerSource
+        }))
+      };
+      writePlanIndex(worktreePath, migrated);
+      return migrated;
+    } catch {}
+  }
+  const fresh = {
+    openeccVersion: getOpenEccVersion(),
+    schemaVersion: 3,
+    projectDir: worktreePath,
+    projectName: path2.basename(worktreePath),
+    updatedAt: new Date().toISOString(),
+    activePlanId: null,
+    plans: []
+  };
+  writePlanIndex(worktreePath, fresh);
+  return fresh;
 }
 function getActivePlan(worktreePath) {
   const idx = readPlanIndex(worktreePath);
@@ -161,67 +200,6 @@ function nextPlanId(idx) {
     return isNaN(n) ? m : Math.max(m, n);
   }, 0);
   return `plan-${String(maxN + 1).padStart(3, "0")}`;
-}
-function assessPlanQuality(plan) {
-  const report = [];
-  let score = 0;
-  if (plan.goal && plan.goal.length >= 10) {
-    score += 10;
-  } else {
-    report.push("Goal is too short or missing (max -10)");
-  }
-  if (plan.check && plan.check.length >= 5) {
-    score += 15;
-  } else {
-    report.push("Check/completion criteria is missing or too short (max -15)");
-  }
-  if (plan.tasks.length > 0)
-    score += 10;
-  if (plan.tasks.length >= 2)
-    score += 8;
-  if (plan.tasks.length >= 3)
-    score += 7;
-  const tasksWithVer = plan.tasks.filter((t) => t.verification?.trim());
-  score += Math.round(tasksWithVer.length / Math.max(plan.tasks.length, 1) * 20);
-  if (!detectCycle(plan.tasks)) {
-    score += 10;
-  } else {
-    report.push("Task dependencies contain a cycle (max -10)");
-  }
-  const tasksWithFiles = plan.tasks.filter((t) => t.files.length > 0);
-  score += Math.min(tasksWithFiles.length * 3, 10);
-  if (plan.tasks.length <= 12) {
-    score += 10;
-  } else {
-    report.push(`Too many tasks: ${plan.tasks.length} (max 12) (max -10)`);
-  }
-  return { score, report };
-}
-function detectCycle(tasks) {
-  const adj = new Map;
-  for (const t of tasks)
-    adj.set(t.id, t.depends_on);
-  const visited = new Set;
-  const inStack = new Set;
-  function dfs(id) {
-    if (inStack.has(id))
-      return true;
-    if (visited.has(id))
-      return false;
-    visited.add(id);
-    inStack.add(id);
-    for (const dep of adj.get(id) || []) {
-      if (dfs(dep))
-        return true;
-    }
-    inStack.delete(id);
-    return false;
-  }
-  for (const t of tasks) {
-    if (dfs(t.id))
-      return true;
-  }
-  return false;
 }
 var COMPLEX_PATTERNS = [
   "refactor",
@@ -315,7 +293,7 @@ function createPlan(worktreePath, input) {
       total,
       completed: 0,
       blocked: 0,
-      file: `${pid}.yaml`,
+      file: `plans/${pid}.yaml`,
       plannerMode: input.plannerMode,
       plannerSource: input.plannerSource
     };
@@ -370,15 +348,6 @@ function updatePlanStatus(worktreePath, id, newStatus, updates) {
   if (!validatePlanTransition(entry.status, newStatus)) {
     return `Invalid transition: ${entry.status} \u2192 ${newStatus}. Valid: ${(VALID_TRANSITIONS[entry.status] || []).join(", ") || "none (terminal state)"}`;
   }
-  if (newStatus === "reviewed" || newStatus === "ready") {
-    const plan2 = readPlanFile(worktreePath, id);
-    if (plan2) {
-      const q = assessPlanQuality(plan2);
-      if (q.score < 60) {
-        return `Plan quality score ${q.score}/100 is below minimum 60. Issues: ${q.report.join("; ") || "none"}`;
-      }
-    }
-  }
   entry.status = newStatus;
   entry.updatedAt = now();
   if (updates?.done !== undefined)
@@ -403,7 +372,7 @@ function updatePlanStatus(worktreePath, id, newStatus, updates) {
   return null;
 }
 var PROJECT_MARKERS = [".git", "package.json", "go.mod", "Cargo.toml", "pyproject.toml", "composer.json", "Gemfile", "project.json", "pubspec.yaml", "mix.exs"];
-var INIT_MARKERS = [".opencode", ".openecc"];
+var INIT_MARKERS = [".opencode"];
 function isValidProjectDir(dir) {
   try {
     const stat = fs2.statSync(dir);
@@ -502,6 +471,17 @@ shared:
   description: "Read-only external fetch. OK in main context sparingly."`;
   return `<structured type="tool_access">
 ${yaml}
+</structured>`;
+}
+function buildPlanGateBlock(activePlan) {
+  const gate = activePlan.status === "draft" ? `BLOCKED \u2014 plan ${activePlan.id} is in DRAFT status.
+The plan must be approved before any implementation work.
+Ask the user to approve via: /plan transition ${activePlan.id} approved` : `OPEN \u2014 plan ${activePlan.id} is ${activePlan.status}. Proceed within scope.`;
+  return `<structured type="plan_gate">
+plan: ${activePlan.id}
+status: ${activePlan.status}
+completed: ${activePlan.completed}/${activePlan.total}
+gate: ${gate}
 </structured>`;
 }
 function yamlStr(s) {
@@ -737,6 +717,24 @@ var skillsDir = path3.resolve(__dirname3, "..", "skills");
 var agentsDir = path3.resolve(__dirname3, "..", "prompts", "agents");
 var commandsDir = path3.resolve(__dirname3, "..", "commands");
 var agentsMDPath = path3.resolve(__dirname3, "..", "..", "AGENTS.md");
+var discoveredSkillDirs = null;
+function scanSkillDirs(rootDir) {
+  if (discoveredSkillDirs)
+    return discoveredSkillDirs;
+  const results = [];
+  try {
+    const entries = fs3.readdirSync(rootDir, { withFileTypes: true });
+    for (const entry of entries) {
+      if (!entry.isDirectory())
+        continue;
+      if (fs3.existsSync(path3.join(rootDir, entry.name, "SKILL.md"))) {
+        results.push(path3.join(rootDir, entry.name));
+      }
+    }
+  } catch {}
+  discoveredSkillDirs = results;
+  return results;
+}
 function readFileSafe(filePath) {
   try {
     return fs3.readFileSync(filePath, "utf8");
@@ -783,44 +781,23 @@ function buildProjectProfileSection(p) {
   return lines.join(`
 `);
 }
-
-class GoalTracker {
-  condition = null;
-  turnCount = 0;
-  start(condition) {
-    this.condition = condition;
-    this.turnCount = 0;
-  }
-  clear() {
-    this.condition = null;
-    this.turnCount = 0;
-  }
-  isActive() {
-    return this.condition !== null;
-  }
-  getState() {
-    return this.condition ? { condition: this.condition, turnCount: this.turnCount } : null;
-  }
-  status() {
-    if (!this.condition)
-      return "No active goal.";
-    return `## Goal Status
-
-Condition: ${this.condition}
-Turns: ${this.turnCount}`;
-  }
-}
 var DELEGATOR_ROLE = `## Your Role (OpenECC Delegator)
 Your primary job is to delegate, synthesize, and verify \u2014 not to do work directly.
 
 ### When to delegate to a subagent (@mention):
-- Planning / architecture \u2192 @planner
+- Planning / architecture \u2192 @planner, @architect
 - Code review / quality \u2192 @code-reviewer
 - Security review \u2192 @security-reviewer
 - Build/type errors \u2192 @build-error-resolver
 - Test-first development \u2192 @tdd-guide
+- Database design \u2192 @database-reviewer
+- E2E testing \u2192 @e2e-runner
+- Documentation \u2192 @doc-updater, @docs-lookup
 - Codebase/web search \u2192 @search-agent
+- Loop operations \u2192 @loop-operator
+- Code cleanup \u2192 @refactor-cleaner
 - Plan reviews \u2192 @plan-ceo-reviewer, @plan-eng-reviewer, @plan-design-reviewer, @plan-devex-reviewer
+- Harness optimization \u2192 @harness-optimizer
 
 ### When to answer directly:
 - Simple factual questions, quick clarifications, status checks
@@ -863,6 +840,13 @@ var AGENTS = [
   { name: "security-reviewer", desc: "Security vulnerability detection and remediation.", permission: { task: "deny" } },
   { name: "tdd-guide", desc: "Test-Driven Development specialist. 80%+ test coverage.", permission: { task: "deny" } },
   { name: "build-error-resolver", desc: "Build and TypeScript error resolution. Minimal diffs.", permission: { task: "deny" } },
+  { name: "database-reviewer", desc: "PostgreSQL query optimization, schema design, security.", permission: { task: "deny" } },
+  { name: "doc-updater", desc: "Documentation and codemap maintenance.", permission: { task: "deny" } },
+  { name: "docs-lookup", desc: "Library/API reference research via web fetch.", permission: { edit: "deny", write: "deny", bash: "deny", task: "deny" } },
+  { name: "e2e-runner", desc: "Playwright E2E tests, Page Object Model, CI/CD.", permission: { task: "deny" } },
+  { name: "harness-optimizer", desc: "Analyze and improve local agent harness config.", permission: { task: "deny" } },
+  { name: "loop-operator", desc: "Autonomous loop monitoring, stall detection, safe intervention.", permission: { task: "deny" } },
+  { name: "refactor-cleaner", desc: "Dead code removal, consolidation, duplicates.", permission: { task: "deny" } },
   { name: "search-agent", desc: "Low-cost search specialist. grep/glob/webfetch/websearch.", permission: { edit: "deny", write: "deny", bash: "deny", task: "deny" } },
   { name: "plan-ceo-reviewer", desc: "Business/product perspective plan review.", permission: { edit: "deny", write: "deny", task: "deny" } },
   { name: "plan-eng-reviewer", desc: "Engineering/architecture plan review.", permission: { edit: "deny", write: "deny", task: "deny" } },
@@ -873,14 +857,35 @@ var COMMANDS = [
   { name: "plan", desc: "Create a detailed implementation plan", agent: "planner", subtask: true },
   { name: "code-review", desc: "Review code for quality, security, maintainability", agent: "code-reviewer", subtask: true },
   { name: "security", desc: "Run comprehensive security review", agent: "security-reviewer", subtask: true },
+  { name: "security-scan", desc: "Run OWASP + STRIDE security audit", agent: "security-reviewer", subtask: true },
   { name: "tdd", desc: "Enforce TDD with 80%+ coverage", agent: "tdd-guide", subtask: true },
   { name: "build-fix", desc: "Fix build/type errors", agent: "build-error-resolver", subtask: true },
-  { name: "swarm", desc: "Full pipeline: think \u2192 plan \u2192 review \u2192 build \u2192 test \u2192 ship", agent: "planner", subtask: true }
+  { name: "e2e", desc: "Generate and run Playwright E2E tests", agent: "e2e-runner", subtask: true },
+  { name: "orchestrate", desc: "Orchestrate multiple agents for complex tasks", agent: "planner", subtask: true },
+  { name: "refactor-clean", desc: "Remove dead code and consolidate duplicates", agent: "refactor-cleaner", subtask: true },
+  { name: "update-docs", desc: "Update documentation", agent: "doc-updater", subtask: true },
+  { name: "update-codemaps", desc: "Update codemaps", agent: "doc-updater", subtask: true },
+  { name: "test-coverage", desc: "Analyze test coverage", agent: "tdd-guide", subtask: true },
+  { name: "checkpoint", desc: "Save verification state and progress" },
+  { name: "eval", desc: "Run evaluation against criteria" },
+  { name: "evolve", desc: "Cluster instincts into skills" },
+  { name: "harness-audit", desc: "Audit harness configuration and health" },
+  { name: "instinct-status", desc: "View learned instincts" },
+  { name: "instinct-import", desc: "Import instincts" },
+  { name: "instinct-export", desc: "Export instincts" },
+  { name: "learn", desc: "Extract patterns and learnings from session" },
+  { name: "loop-start", desc: "Start an autonomous agent loop" },
+  { name: "loop-status", desc: "Check loop status and iteration metrics" },
+  { name: "projects", desc: "List known projects and instinct stats" },
+  { name: "promote", desc: "Promote project instincts to global scope" },
+  { name: "quality-gate", desc: "Run quality gates: build, types, lint, tests" },
+  { name: "setup-pm", desc: "Configure package manager" },
+  { name: "skill-create", desc: "Generate skills from git history" },
+  { name: "verify", desc: "Run verification loop" }
 ];
 var OpenECCPlugin = async ({ client, directory, worktree }) => {
   const worktreePath = worktree || directory;
   let projectProfile = null;
-  const goalTracker = new GoalTracker;
   const editedFiles = new Set;
   return {
     "tool.definition": async (input, output) => {
@@ -895,25 +900,6 @@ var OpenECCPlugin = async ({ client, directory, worktree }) => {
       }
     },
     "command.execute.before": async (input, output) => {
-      if (input.command === "goal") {
-        const args = input.arguments;
-        if (!args || args.trim() === "") {
-          output.parts = [{ type: "text", text: "Usage: /goal <condition> | /goal status | /goal clear", id: "", sessionID: "", messageID: "" }];
-          return;
-        }
-        const parts = args.trim().split(/\s+/);
-        const sub = parts[0]?.toLowerCase();
-        if (sub === "status") {
-          output.parts = [{ type: "text", text: goalTracker.status(), id: "", sessionID: "", messageID: "" }];
-        } else if (sub === "clear") {
-          goalTracker.clear();
-          output.parts = [{ type: "text", text: "Goal cleared.", id: "", sessionID: "", messageID: "" }];
-        } else {
-          goalTracker.start(args.trim());
-          output.parts = [{ type: "text", text: `Goal started: "${args.trim()}".`, id: "", sessionID: "", messageID: "" }];
-        }
-        return;
-      }
       if (input.command === "plan") {
         const planArgs = input.arguments?.trim() || "";
         const planParts = planArgs.split(/\s+/);
@@ -961,7 +947,7 @@ var OpenECCPlugin = async ({ client, directory, worktree }) => {
             output.parts = [{ type: "text", text: "Usage: /plan transition <id> <status>", id: "", sessionID: "", messageID: "" }];
             return;
           }
-          const VALID_STATUSES = ["draft", "reviewed", "ready", "approved", "in_progress", "done", "blocked", "abandoned"];
+          const VALID_STATUSES = ["draft", "approved", "in_progress", "done", "blocked", "abandoned"];
           if (!VALID_STATUSES.includes(newStatus)) {
             output.parts = [{ type: "text", text: `Invalid status: "${newStatus}". Valid: ${VALID_STATUSES.join(", ")}`, id: "", sessionID: "", messageID: "" }];
             return;
@@ -976,8 +962,10 @@ var OpenECCPlugin = async ({ client, directory, worktree }) => {
     config: async (config) => {
       config.skills = config.skills || {};
       config.skills.paths = config.skills.paths || [];
-      if (!config.skills.paths.includes(skillsDir))
-        config.skills.paths.push(skillsDir);
+      for (const skillDir of scanSkillDirs(skillsDir)) {
+        if (!config.skills.paths.includes(skillDir))
+          config.skills.paths.push(skillDir);
+      }
       config.instructions = config.instructions || [];
       if (!config.instructions.some((i) => i === agentsMDPath))
         config.instructions.push(agentsMDPath);
@@ -1016,7 +1004,7 @@ $ARGUMENTS`, ...cmd.agent ? { agent: cmd.agent } : {}, ...cmd.subtask ? { subtas
       const identityBlock = `<EXTREMELY_IMPORTANT>
 I am OpenECC, your engineering workflow layer.
 
-I know my version (\`${pkg.version}\`), my install path (\`${pkg.root}\`), and my job: route work to specialists, gate plans until approved, track goals, and never claim done without verification. I report to you directly with synthesized results. Everything else is delegated.
+I know my version (\`${pkg.version}\`), my install path (\`${pkg.root}\`), and my job: route work to specialists, gate plans until approved, and never claim done without verification. I report to you directly with synthesized results. Everything else is delegated.
 
 You have a soul \u2014 the principles below are always active. They are ALREADY LOADED.
 
@@ -1058,18 +1046,12 @@ goal: ${activeEntry.summary}
           if (!systemMessages.some((p) => p.text?.includes("plan_state"))) {
             systemMessages.push({ type: "text", text: planBlock });
           }
+          const gateBlock = buildPlanGateBlock(activeEntry);
+          if (!systemMessages.some((p) => p.text?.includes("plan_gate"))) {
+            systemMessages.push({ type: "text", text: gateBlock });
+          }
         }
       } catch {}
-      if (goalTracker.isActive()) {
-        const gs = goalTracker.getState();
-        const goalBlock = `<goal_objective>
-condition: ${gs.condition}
-turns: ${gs.turnCount}
-</goal_objective>`;
-        if (!systemMessages.some((p) => p.text?.includes("goal_objective"))) {
-          systemMessages.push({ type: "text", text: goalBlock });
-        }
-      }
     },
     "experimental.chat.messages.transform": async (_input, output) => {
       if (!output.messages?.length)
@@ -1086,43 +1068,35 @@ turns: ${gs.turnCount}
       incrementAttempt();
       try {
         const intent = classifyIntent(userText);
-        if (intent.isWork && isValidProjectDir(worktreePath)) {
-          const scope = classifyTaskScope(userText);
-          if (scope !== "trivial") {
-            const existingPlan = getActivePlan(worktreePath);
-            if (!existingPlan || existingPlan.status === "done" || existingPlan.status === "abandoned" || existingPlan.status === "blocked") {
-              const result = scope === "complex" ? createPlan(worktreePath, { summary: userText, status: "draft" }) : createBuiltinPlan(worktreePath, userText, "auto");
-              if (result) {
-                const firstText = parts.find((p) => p.type === "text");
-                if (firstText && typeof firstText.text === "string") {
-                  const planStatus = result.plan.status;
-                  firstText.text = planStatus === "draft" ? `[plan:${result.id}] Auto-created DRAFT plan for: "${result.summary}". Tasks: ${result.plan.tasks.length}. Approve via /plan transition ${result.id} approved.
-
-${firstText.text}` : `[plan:${result.id}] Auto-created plan for: "${result.summary}". Tasks: ${result.plan.tasks.length}. Proceeding.
+        if (!intent.isWork || !isValidProjectDir(worktreePath))
+          return;
+        const scope = classifyTaskScope(userText);
+        if (scope === "trivial")
+          return;
+        const existingPlan = getActivePlan(worktreePath);
+        if (existingPlan && existingPlan.status !== "done" && existingPlan.status !== "abandoned" && existingPlan.status !== "blocked")
+          return;
+        const result = scope === "complex" ? createPlan(worktreePath, { summary: userText, status: "draft" }) : createBuiltinPlan(worktreePath, userText, "auto");
+        if (result) {
+          const firstText = parts.find((p) => p.type === "text");
+          if (firstText && typeof firstText.text === "string") {
+            if (result.plan.status === "draft") {
+              firstText.text = `<PLAN_GATE>
+Plan ${result.id} created in DRAFT for: "${result.summary}"
+Tasks: ${result.plan.tasks.length}
+Gate: BLOCKED \u2014 this plan needs approval before any implementation.
+Approve: /plan transition ${result.id} approved
+</PLAN_GATE>
 
 ${firstText.text}`;
-                }
-              }
+            } else {
+              firstText.text = `[plan:${result.id}] Auto-approved plan for: "${result.summary}". ${result.plan.tasks.length} tasks. Proceeding.
+
+${firstText.text}`;
             }
           }
         }
       } catch {}
-      if (goalTracker.isActive()) {
-        for (const msg of output.messages ?? []) {
-          if (msg.info?.role === "assistant") {
-            const text = (msg.parts || []).map((p) => p.text || "").join(" ");
-            if (text.includes("[goal:complete]")) {
-              goalTracker.clear();
-              continue;
-            }
-            if (text.includes("[goal:blocked]")) {
-              goalTracker.clear();
-              continue;
-            }
-          }
-        }
-        goalTracker.turnCount++;
-      }
     },
     "experimental.session.compacting": async (_input, output) => {
       const pkg = getPackageInfo();
@@ -1137,11 +1111,6 @@ ${firstText.text}`;
         output.context.push("## Project Profile");
         output.context.push(`- Languages: ${projectProfile.languages.join(", ") || "none detected"}`);
         output.context.push(`- Package manager: ${projectProfile.packageManager}`, "");
-      }
-      if (goalTracker.isActive()) {
-        const s = goalTracker.getState();
-        output.context.push("## Active Goal");
-        output.context.push(`- Condition: ${s.condition}`, `- Turns: ${s.turnCount}`, "");
       }
       if (editedFiles.size > 0) {
         output.context.push("## Recently Edited Files");
@@ -1161,6 +1130,9 @@ ${firstText.text}`;
     "session.created": async () => {
       const pkg = getPackageInfo();
       await client.app.log({ body: { service: "openecc", level: "info", message: `Session started \u2014 OpenECC v${pkg.version} active` } });
+      try {
+        migrateOpeneccState(worktreePath);
+      } catch {}
     },
     "session.deleted": async () => {
       editedFiles.clear();

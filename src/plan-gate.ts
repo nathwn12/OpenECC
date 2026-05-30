@@ -7,8 +7,6 @@ import { getOpenEccVersion } from "./identity"
 
 export type PlanStatus =
   | "draft"
-  | "reviewed"
-  | "ready"
   | "approved"
   | "in_progress"
   | "done"
@@ -16,9 +14,7 @@ export type PlanStatus =
   | "abandoned"
 
 export const VALID_TRANSITIONS: Record<string, PlanStatus[]> = {
-  draft:      ["reviewed", "abandoned"],
-  reviewed:   ["ready", "approved", "draft", "abandoned"],
-  ready:      ["in_progress", "abandoned"],
+  draft:      ["approved", "abandoned"],
   approved:   ["in_progress", "abandoned"],
   in_progress:["done", "blocked", "abandoned"],
   blocked:    ["draft", "abandoned"],
@@ -98,20 +94,20 @@ export type TaskScope = "trivial" | "lightweight" | "complex"
 
 // ── Paths ──────────────────────────────────────────────────────────────────
 
-function openeccDir(worktreePath: string): string {
-  return path.join(worktreePath, ".openecc")
+function stateDir(worktreePath: string): string {
+  return path.join(worktreePath, ".opencode")
 }
 
 function indexJsonPath(worktreePath: string): string {
-  return path.join(openeccDir(worktreePath), "index.json")
+  return path.join(stateDir(worktreePath), "index.json")
 }
 
 function planYamlPath(worktreePath: string, planId: string): string {
-  return path.join(openeccDir(worktreePath), `${planId}.yaml`)
+  return path.join(plansDirPath(worktreePath), `${planId}.yaml`)
 }
 
 function plansDirPath(worktreePath: string): string {
-  return openeccDir(worktreePath)
+  return path.join(stateDir(worktreePath), "plans")
 }
 
 // ── Plan File I/O ──────────────────────────────────────────────────────────
@@ -150,7 +146,13 @@ export function readPlanIndex(worktreePath: string): PlanIndex | null {
     if (!fs.existsSync(f)) return null
     const raw = JSON.parse(fs.readFileSync(f, "utf8"))
     if (raw.schemaVersion === 3) return raw as PlanIndex
-    // Old schema — migrate
+    if (raw.schemaVersion === 1) {
+      // bootstrap-format index — treat as schema v3
+      raw.schemaVersion = 3
+      writePlanIndex(worktreePath, raw as PlanIndex)
+      return raw as PlanIndex
+    }
+    // schema v2 or unknown — migrate from legacy
     return migrateOpeneccState(worktreePath)
   } catch {
     return null
@@ -169,30 +171,61 @@ export function writePlanIndex(worktreePath: string, index: PlanIndex): void {
 // ── Migration ──────────────────────────────────────────────────────────────
 
 export function migrateOpeneccState(worktreePath: string): PlanIndex | null {
-  // Old format had numeric ids under schemaVersion 1/2
-  // Nuke and start fresh — simplest migration path
-  try {
-    const d = openeccDir(worktreePath)
-    if (!fs.existsSync(d)) return null
-    // Remove old yaml files (they were flat, no tasks)
-    const old = fs.readdirSync(d).filter(f => /^plan-\d+\.yaml$/.test(f))
-    for (const f of old) fs.unlinkSync(path.join(d, f))
-    // Write fresh index
-    const fresh: PlanIndex = {
-      openeccVersion: getOpenEccVersion(),
-      schemaVersion: 3,
-      projectDir: worktreePath,
-      projectName: path.basename(worktreePath),
-      updatedAt: new Date().toISOString(),
-      activePlanId: null,
-      plans: [],
-
-    }
-    writePlanIndex(worktreePath, fresh)
-    return fresh
-  } catch {
-    return null
+  const legacy = path.join(worktreePath, ".openecc")
+  if (!fs.existsSync(legacy)) return null
+  const out = stateDir(worktreePath)
+  // migrate plan files
+  const old = fs.readdirSync(legacy).filter(f => /^plan-\d+\.yaml$/.test(f))
+  const plansDir = plansDirPath(worktreePath)
+  if (!fs.existsSync(plansDir)) fs.mkdirSync(plansDir, { recursive: true })
+  for (const f of old) {
+    try {
+      fs.cpSync(path.join(legacy, f), path.join(plansDir, f), { force: true })
+    } catch { /* skip corrupt */ }
   }
+  // migrate index if exists
+  const oldIndex = path.join(legacy, "index.json")
+  if (fs.existsSync(oldIndex)) {
+    try {
+      const raw = JSON.parse(fs.readFileSync(oldIndex, "utf8"))
+      const migrated: PlanIndex = {
+        openeccVersion: getOpenEccVersion(),
+        schemaVersion: 3,
+        projectDir: worktreePath,
+        projectName: path.basename(worktreePath),
+        updatedAt: new Date().toISOString(),
+        activePlanId: raw.activePlanId ?? null,
+        plans: (raw.plans || []).map((p: Record<string, unknown>) => ({
+          id: String(p.id || ""),
+          status: (p.status as PlanStatus) || "draft",
+          createdAt: String(p.createdAt || new Date().toISOString()),
+          updatedAt: String(p.updatedAt || new Date().toISOString()),
+          parent: p.parent ? String(p.parent) : undefined,
+          summary: String(p.summary || ""),
+          total: Number(p.total || 0),
+          completed: Number(p.completed || 0),
+          blocked: Number(p.blocked || 0),
+          file: p.file ? String(p.file) : "",
+          plannerMode: p.plannerMode as "builtin" | "full" | undefined,
+          plannerSource: p.plannerSource as "auto" | "user" | "gate" | undefined,
+        })),
+      }
+      writePlanIndex(worktreePath, migrated)
+      return migrated
+    } catch { /* fall through to nuke */ }
+  }
+  // legacy index broken or missing — fresh start
+  const fresh: PlanIndex = {
+    openeccVersion: getOpenEccVersion(),
+    schemaVersion: 3,
+    projectDir: worktreePath,
+    projectName: path.basename(worktreePath),
+    updatedAt: new Date().toISOString(),
+    activePlanId: null,
+    plans: [],
+  }
+  writePlanIndex(worktreePath, fresh)
+  return fresh
 }
 
 // ── Active Plan ────────────────────────────────────────────────────────────
@@ -400,7 +433,7 @@ export function createPlan(
       total,
       completed: 0,
       blocked: 0,
-      file: `${pid}.yaml`,
+      file: `plans/${pid}.yaml`,
       plannerMode: input.plannerMode,
       plannerSource: input.plannerSource,
     }
@@ -487,17 +520,6 @@ export function updatePlanStatus(
     return `Invalid transition: ${entry.status} → ${newStatus}. Valid: ${(VALID_TRANSITIONS[entry.status] || []).join(", ") || "none (terminal state)"}`
   }
 
-  // Quality gate: require score >= 60 before transitioning to reviewed or ready
-  if (newStatus === "reviewed" || newStatus === "ready") {
-    const plan = readPlanFile(worktreePath, id)
-    if (plan) {
-      const q = assessPlanQuality(plan)
-      if (q.score < 60) {
-        return `Plan quality score ${q.score}/100 is below minimum 60. Issues: ${q.report.join("; ") || "none"}`
-      }
-    }
-  }
-
   entry.status = newStatus as PlanStatus
   entry.updatedAt = now()
   if (updates?.done !== undefined) entry.completed = updates.done
@@ -527,7 +549,7 @@ export function updatePlanStatus(
 // ── Project Directory Validation ───────────────────────────────────────────
 
 const PROJECT_MARKERS = [".git", "package.json", "go.mod", "Cargo.toml", "pyproject.toml", "composer.json", "Gemfile", "project.json", "pubspec.yaml", "mix.exs"]
-const INIT_MARKERS = [".opencode", ".openecc"]
+const INIT_MARKERS = [".opencode"]
 
 export function isValidProjectDir(dir: string): boolean {
   try {
@@ -616,6 +638,23 @@ shared:
   description: "Read-only external fetch. OK in main context sparingly."`
 
   return `<structured type="tool_access">\n${yaml}\n</structured>`
+}
+
+// ── Plan Gate Block ─────────────────────────────────────────────────────────
+
+export function buildPlanGateBlock(activePlan: PlanIndexEntry): string {
+  const gate = activePlan.status === "draft"
+    ? `BLOCKED — plan ${activePlan.id} is in DRAFT status.
+The plan must be approved before any implementation work.
+Ask the user to approve via: /plan transition ${activePlan.id} approved`
+    : `OPEN — plan ${activePlan.id} is ${activePlan.status}. Proceed within scope.`
+
+  return `<structured type="plan_gate">
+plan: ${activePlan.id}
+status: ${activePlan.status}
+completed: ${activePlan.completed}/${activePlan.total}
+gate: ${gate}
+</structured>`
 }
 
 // ── Drift Detection ────────────────────────────────────────────────────────

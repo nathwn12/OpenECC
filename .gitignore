@@ -4,3 +4,4 @@ dist/
 .openecc/
 .plan/
 PLAN-extractions.md
+.opencode/

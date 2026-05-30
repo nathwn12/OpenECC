@@ -2,6 +2,7 @@ import { describe, it, expect } from "bun:test"
 import * as path from "node:path"
 import * as fs from "node:fs"
 import * as os from "node:os"
+import { fileURLToPath } from "node:url"
 import {
   validatePlanTransition,
   VALID_TRANSITIONS,
@@ -28,7 +29,8 @@ import {
 // ── Helpers ────────────────────────────────────────────────────────────────
 
 function tmpDir(): string {
-  const base = path.join(import.meta.dir, "..", ".openecc-test")
+  const currentDir = path.dirname(fileURLToPath(import.meta.url))
+  const base = path.join(currentDir, "..", ".openecc-test")
   if (!fs.existsSync(base)) fs.mkdirSync(base, { recursive: true })
   return fs.mkdtempSync(path.join(base, "test-"))
 }
@@ -42,7 +44,6 @@ function freshIndex(dir: string): PlanIndex {
     updatedAt: new Date().toISOString(),
     activePlanId: null,
     plans: [],
-    retention: { maxAgeDays: 7, terminalStatuses: ["done", "abandoned"] },
   }
   writePlanIndex(dir, idx)
   return idx
@@ -105,7 +106,7 @@ describe("isValidProjectDir", () => {
 
 describe("VALID_TRANSITIONS", () => {
   it("has all statuses as keys", () => {
-    const statuses = ["draft", "reviewed", "ready", "approved", "in_progress", "done", "blocked", "abandoned"]
+    const statuses = ["draft", "approved", "in_progress", "done", "blocked", "abandoned"]
     for (const s of statuses) {
       expect(VALID_TRANSITIONS[s]).toBeDefined()
     }
@@ -118,8 +119,8 @@ describe("VALID_TRANSITIONS", () => {
 })
 
 describe("validatePlanTransition", () => {
-  it("allows draft → reviewed", () => {
-    expect(validatePlanTransition("draft", "reviewed")).toBe(true)
+  it("allows draft → approved", () => {
+    expect(validatePlanTransition("draft", "approved")).toBe(true)
   })
 
   it("allows approved → in_progress", () => {
@@ -259,7 +260,7 @@ describe("readPlanIndex + writePlanIndex", () => {
     fs.rmSync(dir, { recursive: true })
   })
 
-  it("returns null when no .openecc exists", () => {
+  it("returns null when no .opencode exists", () => {
     const dir = tmpDir()
     const idx = readPlanIndex(dir)
     expect(idx).toBeNull()
@@ -356,7 +357,7 @@ describe("createPlan", () => {
   it("writes YAML file correctly", () => {
     const dir = tmpDir()
     const result = createPlan(dir, { summary: "test summary" })
-    const yamlPath = path.join(dir, ".openecc", `${result!.id}.yaml`)
+    const yamlPath = path.join(dir, ".opencode", "plans", `${result!.id}.yaml`)
     expect(fs.existsSync(yamlPath)).toBe(true)
     const content = fs.readFileSync(yamlPath, "utf8")
     expect(content).toContain("schema: openecc/plan-v1")
@@ -465,7 +466,7 @@ describe("deletePlanById", () => {
   it("removes YAML file when deleting", () => {
     const dir = tmpDir()
     const created = createPlan(dir, { summary: "test plan" })
-    const yamlPath = path.join(dir, ".openecc", `${created!.id}.yaml`)
+    const yamlPath = path.join(dir, ".opencode", "plans", `${created!.id}.yaml`)
     expect(fs.existsSync(yamlPath)).toBe(true)
     deletePlanById(dir, created!.id)
     expect(fs.existsSync(yamlPath)).toBe(false)
@@ -565,7 +566,7 @@ describe("assessPlanQuality", () => {
     fs.rmSync(dir, { recursive: true })
   })
 
-  it("blocks transitions when quality is below 60", () => {
+  it("allows low-quality plan transitions (quality gate removed)", () => {
     const dir = tmpDir()
     const result = createPlan(dir, {
       summary: "x",
@@ -574,9 +575,8 @@ describe("assessPlanQuality", () => {
       tasks: [],
       status: "draft",
     })
-    const err = updatePlanStatus(dir, result!.id, "reviewed")
-    expect(err).not.toBeNull()
-    expect(err).toContain("quality score")
+    const err = updatePlanStatus(dir, result!.id, "approved")
+    expect(err).toBeNull()
     fs.rmSync(dir, { recursive: true })
   })
 })
@@ -607,7 +607,7 @@ describe("deletePlanFile", () => {
   it("deletes the yaml file", () => {
     const dir = tmpDir()
     const result = createPlan(dir, { summary: "to delete" })
-    const f = path.join(dir, ".openecc", `${result!.id}.yaml`)
+    const f = path.join(dir, ".opencode", "plans", `${result!.id}.yaml`)
     expect(fs.existsSync(f)).toBe(true)
     deletePlanFile(dir, result!.id)
     expect(fs.existsSync(f)).toBe(false)
