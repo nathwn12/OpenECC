@@ -22,10 +22,11 @@ Restart OpenCode. The plugin loads on session start: detects your project, regis
 
 ```
 src/
-├── plugin.ts           ← Entrypoint. Hooks session lifecycle, registers everything
-├── plan-gate.ts        ← Plan state machine, index I/O, intent classification, drift detection
-├── identity.ts         ← Package info, version, skills path resolution
-└── execution.ts        ← Attempt tracking, execution context block
+├── plugin.ts            ← Entrypoint. Hooks session lifecycle, registers everything
+├── plan-gate.ts         ← Plan state machine, index I/O, intent classification, drift detection
+├── plan-gate.test.ts    ← 63 tests covering state machine, intent, scope, drift, I/O, migration
+├── identity.ts          ← Package info, version, skills path resolution
+└── execution.ts         ← Attempt tracking, execution context block
 ```
 
 **How a session starts:**
@@ -111,8 +112,7 @@ The plugin enforces strict tool partitioning between main context and subagents:
   ✅ skill         → load skills
   ✅ read          → state files only
   ✅ question      → ask user
-  ✅ todowrite     → track progress
-  ✅ webfetch      → external docs
+  ✅ webfetch      → read-only external fetch (shared)
 
   ❌ edit / write  → BLOCKED
   ❌ bash          → BLOCKED
@@ -180,7 +180,7 @@ The plugin enforces strict tool partitioning between main context and subagents:
 | `/plan` | @planner | Create implementation plans |
 | `/code-review` | @code-reviewer | Quality, security, maintainability review |
 | `/security` | @security-reviewer | OWASP-based security audit |
-| `/security-scan` | @security-reviewer | Full security scan |
+| `/security-scan` | — | Full security scan |
 | `/tdd` | @tdd-guide | Red-green-refactor cycle enforcement |
 | `/build-fix` | @build-error-resolver | Build and type error resolution |
 | `/e2e` | @e2e-runner | Playwright E2E test generation |
@@ -192,13 +192,13 @@ The plugin enforces strict tool partitioning between main context and subagents:
 | `/checkpoint` | — | Save verification state and progress |
 | `/eval` | — | Run evaluation against criteria |
 | `/evolve` | — | Cluster instincts into skills |
-| `/harness-audit` | @harness-optimizer | Harness configuration audit |
+| `/harness-audit` | — | Harness configuration audit |
 | `/instinct-status` | — | View learned instincts |
 | `/instinct-import` | — | Import instincts |
 | `/instinct-export` | — | Export instincts |
 | `/learn` | — | Extract patterns from session |
-| `/loop-start` | @loop-operator | Start autonomous loop |
-| `/loop-status` | @loop-operator | Check loop progress |
+| `/loop-start` | — | Start autonomous loop |
+| `/loop-status` | — | Check loop progress |
 | `/projects` | — | List known projects and instinct stats |
 | `/promote` | — | Promote instincts to global scope |
 | `/quality-gate` | — | Run quality gates |
@@ -250,7 +250,7 @@ Compiles `src/plugin.ts` → `.opencode/plugins/openecc.js` (Bun target, externa
 bun test
 ```
 
-63 tests passing (150 assertions) covering:
+63 tests passing (145 assertions) covering:
 - State machine validation (6 statuses, all valid transitions, all invalid rejections)
 - Intent classification (implement, clarify, review, plan, debug, empty)
 - Task scope classification (trivial, lightweight, complex)
@@ -270,9 +270,6 @@ bun test
 
 ```
 .opencode/
-├── archive/               ← Archived lang-specific agents/commands
-│   ├── agents/
-│   └── commands/
 ├── commands/              ← 28 command templates (.md)
 ├── plans/                 ← Plan state (index.json + plan-00N.yaml)
 ├── plugins/
@@ -294,6 +291,7 @@ bun test
 src/
 ├── plugin.ts              ← Entrypoint — session hooks, config, transforms
 ├── plan-gate.ts           ← State machine, index I/O, intent, drift, quality
+├── plan-gate.test.ts      ← 63 tests (145 assertions)
 ├── identity.ts            ← Package info, skills path resolution
 └── execution.ts           ← Attempt tracking, execution context block
 ```

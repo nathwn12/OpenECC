@@ -6,7 +6,7 @@ This is an OpenCode plugin, not a user-facing app. It provides engineering workf
 
 - **Install**: `bun install`
 - **Bundle**: `bun run bundle` — compiles `src/plugin.ts` → `.opencode/plugins/openecc.js` (Bun target, external `@opencode-ai/plugin`)
-- **Test**: `bun test` — runs test suite (63 tests, 150 assertions)
+- **Test**: `bun test` — runs test suite (63 tests, 145 assertions)
 - **No linter or formatter configured**. Typecheck errors are not gated.
 - **Dist vs reality**: `outDir` in tsconfig is `dist/`, but actual output is `.opencode/plugins/openecc.js` (set in `package.json` `"main"` and `bundle` script)
 
@@ -25,7 +25,6 @@ This is an OpenCode plugin, not a user-facing app. It provides engineering workf
 | `.opencode/skills/` | SKILL.md files loaded by the plugin (11 skills) |
 | `.opencode/plugins/openecc.js` | Bundled plugin output (git-tracked) |
 | `.opencode/plans/` | Plan state (index.json, plan-00N.yaml) — gitignored |
-| `.opencode/archive/` | Archived lang-specific agents/commands |
 
 ## How the Plugin Works
 
