@@ -98,6 +98,22 @@ All transitions validated via `VALID_TRANSITIONS`. Terminal states: `done`, `aba
 - `/plan transition <id> <status>` — transition plan status (validated against state machine)
 - `/instinct status` — view learned instincts with confidence scores and domain summary
 
+## Git Workflow
+
+Default behavior — no skill load needed. Plain English triggers like "commit", "push", "stage", "push now", "ship it" → execute immediately.
+
+| Trigger | Action |
+|---------|--------|
+| "commit it / commit this" | `git add -A && git commit -m "<type>: <desc>"` after analyzing diff |
+| "push / push it / push now" | `git push` to current branch (force-with-lease if rebased) |
+| "stage X / add X" | `git add <path>` then wait |
+| "undo that / revert" | `git restore --staged <path>` or `git checkout -- <path>` |
+| "status / what's changed" | `git status --porcelain` + `git diff --stat` |
+| "branch off <name>" | `git checkout -b <name>` |
+| "ship it" | commit + push in one step |
+
+Commit type from diff analysis: `feat` (new feature/module), `fix` (bug), `refactor` (restructure), `chore` (version bump, build), `docs` (docs only). Description is present tense, imperative, <72 chars.
+
 ## Key Constraints
 
 - **Cache clear** for reinstall: `Remove-Item "$env:USERPROFILE\.cache\opencode\packages\openecc@git+https_*" -Recurse -Force`
