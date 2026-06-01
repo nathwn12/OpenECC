@@ -940,8 +940,14 @@ import * as os3 from "os";
 import { fileURLToPath as fileURLToPath2 } from "url";
 function findPluginRoot(fromDir) {
   for (let i = 0;i < 5; i++) {
-    if (fs5.existsSync(path5.join(fromDir, "package.json")))
-      return fromDir;
+    const pj = path5.join(fromDir, "package.json");
+    if (fs5.existsSync(pj)) {
+      try {
+        const pkg = JSON.parse(fs5.readFileSync(pj, "utf8"));
+        if (pkg.name === "openecc")
+          return fromDir;
+      } catch {}
+    }
     const parent = path5.resolve(fromDir, "..");
     if (parent === fromDir)
       break;

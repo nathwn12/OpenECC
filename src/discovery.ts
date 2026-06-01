@@ -7,7 +7,13 @@ import { fileURLToPath } from "node:url"
 
 function findPluginRoot(fromDir: string): string {
   for (let i = 0; i < 5; i++) {
-    if (fs.existsSync(path.join(fromDir, "package.json"))) return fromDir
+    const pj = path.join(fromDir, "package.json")
+    if (fs.existsSync(pj)) {
+      try {
+        const pkg = JSON.parse(fs.readFileSync(pj, "utf8"))
+        if (pkg.name === "openecc") return fromDir
+      } catch {}
+    }
     const parent = path.resolve(fromDir, "..")
     if (parent === fromDir) break
     fromDir = parent
