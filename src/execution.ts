@@ -1,4 +1,4 @@
-export interface ExecutionContext {
+interface ExecutionContext {
   attempt: number
   struggleDetected: boolean
   lastErrorPattern: string | null
@@ -12,32 +12,12 @@ let _ctx: ExecutionContext = {
   compactionCount: 0,
 }
 
-export function getExecutionContext(): ExecutionContext {
+function getExecutionContext(): ExecutionContext {
   return { ..._ctx }
 }
 
 export function incrementAttempt(): void {
   _ctx.attempt++
-}
-
-export function recordError(pattern: string): void {
-  if (_ctx.lastErrorPattern === pattern) {
-    _ctx.struggleDetected = true
-  }
-  _ctx.lastErrorPattern = pattern
-}
-
-export function clearStruggle(): void {
-  _ctx.struggleDetected = false
-  _ctx.lastErrorPattern = null
-}
-
-export function resetExecutionContext(): void {
-  _ctx = { attempt: 0, struggleDetected: false, lastErrorPattern: null, compactionCount: 0 }
-}
-
-export function incrementCompaction(): void {
-  _ctx.compactionCount++
 }
 
 export function buildExecutionContextBlock(): string {

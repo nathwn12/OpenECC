@@ -14,6 +14,11 @@ import { readInstincts, buildInstinctStatusTable } from "./instinct"
 import { incrementAttempt, buildExecutionContextBlock } from "./execution"
 import { loadModelRoutingConfig, applyModelRouting } from "./model-routing"
 import { discoverAgents, discoverCommands, discoverSkills } from "./discovery"
+import {
+  memory_recall, memory_status,
+  onSessionCreated, onSessionDeleted, onFileEdited, onToolExecuted,
+  buildMemoryContinuityBlock,
+} from "./memory"
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const agentsMDPath = path.resolve(__dirname, "..", "..", "AGENTS.md")
@@ -134,6 +139,11 @@ export const OpenECCPlugin: Plugin = async ({ client, directory, worktree }) => 
       if (input.toolID === "bash") {
         output.description = `[OPENECC ENFORCEMENT] All commands must run inside a subagent. | ${output.description}`
       }
+    },
+
+    tool: {
+      memory_recall,
+      memory_status,
     },
 
     "command.execute.before": async (input: { command: string; arguments: string }, output: { parts: any[] }) => {
@@ -379,26 +389,40 @@ ${firstText.text}`
         for (const f of editedFiles) output.context.push(`- ${f}`)
         output.context.push("")
       }
+
+      // Inject memory continuity block (persistent across compaction)
+      try {
+        const memBlock = buildMemoryContinuityBlock()
+        if (memBlock) output.context.push(memBlock)
+      } catch {}
     },
 
     "file.edited": async (event: { path: string }) => {
       editedFiles.add(event.path)
+      try { onFileEdited(event.path) } catch {}
     },
 
     "tool.execute.after": async (input: { tool: string; args?: Record<string, unknown> }, _output: unknown) => {
       const filePath = input.args?.filePath as string | undefined
-      if ((input.tool === "edit" || input.tool === "write") && filePath) editedFiles.add(filePath)
+      if ((input.tool === "edit" || input.tool === "write") && filePath) {
+        editedFiles.add(filePath)
+        try { onToolExecuted(input.tool, input.args) } catch {}
+      }
     },
 
-    "session.created": async () => {
+    "session.created": async (event: any) => {
       const pkg = getPackageInfo()
+      const sessionId: string = event?.sessionID ?? event?.id ?? ""
       await client.app.log({ body: { service: "openecc", level: "info" as const, message: `Session started — OpenECC v${pkg.version} active` } })
       // One-time migration: .openecc → .opencode (only runs if legacy dir exists)
       try { migrateOpeneccState(worktreePath) } catch {}
+      // Init memory store, log session start, run lightweight maintenance
+      try { onSessionCreated(sessionId) } catch {}
     },
 
     "session.deleted": async () => {
       editedFiles.clear()
+      try { onSessionDeleted() } catch {}
     },
   }
 }

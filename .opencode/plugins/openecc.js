@@ -1,7 +1,7 @@
 // @bun
 // src/plugin.ts
-import * as path6 from "path";
-import * as fs6 from "fs";
+import * as path7 from "path";
+import * as fs7 from "fs";
 import { fileURLToPath as fileURLToPath3 } from "url";
 
 // src/plan-gate.ts
@@ -1126,12 +1126,607 @@ function discoverSkills(worktreePath) {
   return cachedSkills;
 }
 
+// src/memory.ts
+import { Database } from "bun:sqlite";
+import * as fs6 from "fs";
+import * as path6 from "path";
+import * as os4 from "os";
+import { tool } from "@opencode-ai/plugin";
+var SCHEMA_VERSION = 1;
+var MEMORY_DIR = path6.join(os4.homedir(), ".local", "share", "opencode", "memory");
+var MEMORY_DB = "memory.db";
+var PROFILE_USER = "memory-profile.wy";
+var PROFILE_PROJECT = "memory-project.wy";
+var MAX_RECALL = 10;
+var MAX_PROFILE_ENTRIES = 20;
+var MAX_PROJECT_ENTRIES = 30;
+function wy_encode(entries) {
+  const lines = [`WY|${SCHEMA_VERSION}`];
+  for (const e of entries)
+    lines.push([e.type, ...e.fields].join("|"));
+  return lines.join(`
+`) + `
+`;
+}
+function wy_decode(wy) {
+  const entries = [];
+  for (const line of wy.split(`
+`)) {
+    const t = line.trim();
+    if (!t || t.startsWith("#") || t.startsWith("WY|"))
+      continue;
+    const parts = t.split("|");
+    if (parts.length < 2)
+      continue;
+    const type = parts[0];
+    if (!["F", "E", "D", "S"].includes(type))
+      continue;
+    entries.push({ type, fields: parts.slice(1) });
+  }
+  return entries;
+}
+function wy_fact(scope, key, value, ts) {
+  return { type: "F", fields: [scope, key, value, ts ?? Date.now().toString(36)] };
+}
+
+class MemoryStore {
+  db = null;
+  memoryDir;
+  opened = false;
+  constructor(baseDir) {
+    this.memoryDir = baseDir ?? MEMORY_DIR;
+  }
+  open() {
+    if (this.opened)
+      return;
+    fs6.mkdirSync(this.memoryDir, { recursive: true });
+    const dbPath = path6.join(this.memoryDir, MEMORY_DB);
+    this.db = new Database(dbPath);
+    this.db.exec("PRAGMA journal_mode=WAL");
+    this.db.exec("PRAGMA synchronous=NORMAL");
+    this.opened = true;
+    this.applySchema();
+  }
+  close() {
+    if (!this.opened || !this.db)
+      return;
+    try {
+      this.db.exec("INSERT INTO openecc_entries_fts(openecc_entries_fts) VALUES ('optimize')");
+    } catch {}
+    try {
+      this.db.exec("INSERT INTO openecc_facts_fts(openecc_facts_fts) VALUES ('optimize')");
+    } catch {}
+    try {
+      this.db.exec("INSERT INTO openecc_summaries_fts(openecc_summaries_fts) VALUES ('optimize')");
+    } catch {}
+    this.db.close();
+    this.db = null;
+    this.opened = false;
+  }
+  isOpen() {
+    return this.opened;
+  }
+  ensure() {
+    if (!this.opened || !this.db)
+      this.open();
+    return this.db;
+  }
+  applySchema() {
+    const db = this.db;
+    if (!db)
+      return;
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS openecc_schema_version (
+        version INTEGER PRIMARY KEY,
+        applied_at INTEGER NOT NULL
+      )
+    `);
+    const row = db.query("SELECT version FROM openecc_schema_version ORDER BY version DESC LIMIT 1").get();
+    const current = row?.version ?? 0;
+    if (current >= SCHEMA_VERSION)
+      return;
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS openecc_entries (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id TEXT NOT NULL DEFAULT '',
+        kind TEXT NOT NULL DEFAULT 'event',
+        content TEXT NOT NULL,
+        source TEXT NOT NULL DEFAULT '',
+        created_at INTEGER NOT NULL
+      )
+    `);
+    db.exec(`
+      CREATE VIRTUAL TABLE IF NOT EXISTS openecc_entries_fts USING fts5(
+        content,
+        content=openecc_entries,
+        content_rowid=id,
+        tokenize='unicode61'
+      )
+    `);
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS openecc_facts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        tier TEXT NOT NULL DEFAULT 'learned',
+        scope TEXT NOT NULL DEFAULT '',
+        key TEXT NOT NULL DEFAULT '',
+        value TEXT NOT NULL DEFAULT '',
+        content_wy TEXT NOT NULL DEFAULT '',
+        source_ref TEXT NOT NULL DEFAULT '',
+        importance REAL NOT NULL DEFAULT 1.0,
+        confidence REAL NOT NULL DEFAULT 0.5,
+        supersedes_id INTEGER,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        active INTEGER NOT NULL DEFAULT 1
+      )
+    `);
+    db.exec(`
+      CREATE VIRTUAL TABLE IF NOT EXISTS openecc_facts_fts USING fts5(
+        content_wy,
+        content=openecc_facts,
+        content_rowid=id,
+        tokenize='unicode61'
+      )
+    `);
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS openecc_summaries (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id TEXT NOT NULL DEFAULT '',
+        kind TEXT NOT NULL DEFAULT 'compaction',
+        content_wy TEXT NOT NULL,
+        source_range_start TEXT,
+        source_range_end TEXT,
+        created_at INTEGER NOT NULL
+      )
+    `);
+    db.exec(`
+      CREATE VIRTUAL TABLE IF NOT EXISTS openecc_summaries_fts USING fts5(
+        content_wy,
+        content=openecc_summaries,
+        content_rowid=id,
+        tokenize='unicode61'
+      )
+    `);
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS openecc_maintenance (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL,
+        updated_at INTEGER NOT NULL
+      )
+    `);
+    db.exec(`
+      CREATE TRIGGER IF NOT EXISTS openecc_entries_ai
+      AFTER INSERT ON openecc_entries BEGIN
+        INSERT INTO openecc_entries_fts(rowid, content) VALUES (new.id, new.content);
+      END
+    `);
+    db.exec(`
+      CREATE TRIGGER IF NOT EXISTS openecc_entries_ad
+      AFTER DELETE ON openecc_entries BEGIN
+        INSERT INTO openecc_entries_fts(openecc_entries_fts, rowid, content)
+        VALUES ('delete', old.id, old.content);
+      END
+    `);
+    db.exec(`
+      CREATE TRIGGER IF NOT EXISTS openecc_entries_au
+      AFTER UPDATE ON openecc_entries BEGIN
+        INSERT INTO openecc_entries_fts(openecc_entries_fts, rowid, content)
+        VALUES ('delete', old.id, old.content);
+        INSERT INTO openecc_entries_fts(rowid, content) VALUES (new.id, new.content);
+      END
+    `);
+    db.exec(`
+      CREATE TRIGGER IF NOT EXISTS openecc_facts_ai
+      AFTER INSERT ON openecc_facts BEGIN
+        INSERT INTO openecc_facts_fts(rowid, content_wy) VALUES (new.id, new.content_wy);
+      END
+    `);
+    db.exec(`
+      CREATE TRIGGER IF NOT EXISTS openecc_facts_ad
+      AFTER DELETE ON openecc_facts BEGIN
+        INSERT INTO openecc_facts_fts(openecc_facts_fts, rowid, content_wy)
+        VALUES ('delete', old.id, old.content_wy);
+      END
+    `);
+    db.exec(`
+      CREATE TRIGGER IF NOT EXISTS openecc_facts_au
+      AFTER UPDATE ON openecc_facts BEGIN
+        INSERT INTO openecc_facts_fts(openecc_facts_fts, rowid, content_wy)
+        VALUES ('delete', old.id, old.content_wy);
+        INSERT INTO openecc_facts_fts(rowid, content_wy) VALUES (new.id, new.content_wy);
+      END
+    `);
+    db.exec(`
+      CREATE TRIGGER IF NOT EXISTS openecc_summaries_ai
+      AFTER INSERT ON openecc_summaries BEGIN
+        INSERT INTO openecc_summaries_fts(rowid, content_wy) VALUES (new.id, new.content_wy);
+      END
+    `);
+    db.exec(`
+      CREATE TRIGGER IF NOT EXISTS openecc_summaries_ad
+      AFTER DELETE ON openecc_summaries BEGIN
+        INSERT INTO openecc_summaries_fts(openecc_summaries_fts, rowid, content_wy)
+        VALUES ('delete', old.id, old.content_wy);
+      END
+    `);
+    db.exec(`
+      CREATE TRIGGER IF NOT EXISTS openecc_summaries_au
+      AFTER UPDATE ON openecc_summaries BEGIN
+        INSERT INTO openecc_summaries_fts(openecc_summaries_fts, rowid, content_wy)
+        VALUES ('delete', old.id, old.content_wy);
+        INSERT INTO openecc_summaries_fts(rowid, content_wy) VALUES (new.id, new.content_wy);
+      END
+    `);
+    db.exec("INSERT OR IGNORE INTO openecc_schema_version (version, applied_at) VALUES (?, ?)", [SCHEMA_VERSION, Date.now()]);
+  }
+  captureEntry(session_id, kind, content, source = "") {
+    const db = this.ensure();
+    db.run("INSERT INTO openecc_entries (session_id, kind, content, source, created_at) VALUES (?, ?, ?, ?, ?)", [session_id, kind, content, source, Date.now()]);
+  }
+  captureFact(tier, scope, key, value, source_ref = "") {
+    const db = this.ensure();
+    const wy = wy_encode([wy_fact(scope, key, value)]);
+    const existing = db.query("SELECT id, value FROM openecc_facts WHERE scope = ? AND key = ? AND active = 1 ORDER BY updated_at DESC LIMIT 1").get(scope, key);
+    if (existing) {
+      if (existing.value !== value) {
+        db.run("UPDATE openecc_facts SET active = 0, updated_at = ? WHERE id = ?", [Date.now(), existing.id]);
+        db.run(`INSERT INTO openecc_facts
+           (tier, scope, key, value, content_wy, source_ref, importance, confidence, supersedes_id, created_at, updated_at, active)
+           VALUES (?, ?, ?, ?, ?, ?, 1.0, 0.8, ?, ?, ?, 1)`, [tier, scope, key, value, wy, source_ref, existing.id, Date.now(), Date.now()]);
+      } else {
+        db.run("UPDATE openecc_facts SET updated_at = ?, source_ref = ? WHERE id = ?", [Date.now(), source_ref, existing.id]);
+      }
+    } else {
+      db.run(`INSERT INTO openecc_facts
+         (tier, scope, key, value, content_wy, source_ref, importance, confidence, supersedes_id, created_at, updated_at, active)
+         VALUES (?, ?, ?, ?, ?, ?, 1.0, 0.5, NULL, ?, ?, 1)`, [tier, scope, key, value, wy, source_ref, Date.now(), Date.now()]);
+    }
+  }
+  captureSummary(session_id, kind, content_wy, range_start, range_end) {
+    const db = this.ensure();
+    db.run("INSERT INTO openecc_summaries (session_id, kind, content_wy, source_range_start, source_range_end, created_at) VALUES (?, ?, ?, ?, ?, ?)", [session_id, kind, content_wy, range_start ?? null, range_end ?? null, Date.now()]);
+  }
+  recall(query, limit = MAX_RECALL) {
+    this.ensure();
+    const safe = query.replace(/['"]/g, "").replace(/[*()|&!-]/g, " ").trim();
+    if (!safe)
+      return { entries: [], facts: [], summaries: [] };
+    const entries = [];
+    const facts = [];
+    const summaries = [];
+    try {
+      const rows = this.db.query(`
+        SELECT e.* FROM openecc_entries e
+        JOIN openecc_entries_fts fts ON e.id = fts.rowid
+        WHERE openecc_entries_fts MATCH ?
+        ORDER BY bm25(openecc_entries_fts)
+        LIMIT ?
+      `).all(safe, limit);
+      entries.push(...rows);
+    } catch {}
+    try {
+      const rows = this.db.query(`
+        SELECT f.* FROM openecc_facts f
+        JOIN openecc_facts_fts fts ON f.id = fts.rowid
+        WHERE openecc_facts_fts MATCH ? AND f.active = 1
+        ORDER BY bm25(openecc_facts_fts)
+        LIMIT ?
+      `).all(safe, limit);
+      facts.push(...rows);
+    } catch {}
+    try {
+      const rows = this.db.query(`
+        SELECT s.* FROM openecc_summaries s
+        JOIN openecc_summaries_fts fts ON s.id = fts.rowid
+        WHERE openecc_summaries_fts MATCH ?
+        ORDER BY bm25(openecc_summaries_fts)
+        LIMIT ?
+      `).all(safe, limit);
+      summaries.push(...rows);
+    } catch {}
+    return { entries, facts, summaries };
+  }
+  buildMemoryContext(query) {
+    this.ensure();
+    const blocks = [];
+    const profile = this.readWyFile(PROFILE_USER);
+    const project = this.readWyFile(PROFILE_PROJECT);
+    if (profile.length || project.length) {
+      const lines = ['<structured type="memory">'];
+      if (profile.length) {
+        lines.push("profile:");
+        for (const e of profile)
+          lines.push(`  - ${e.type}|${e.fields.join("|")}`);
+      }
+      if (project.length) {
+        lines.push("project:");
+        for (const e of project)
+          lines.push(`  - ${e.type}|${e.fields.join("|")}`);
+      }
+      lines.push("</structured>");
+      blocks.push(lines.join(`
+`));
+    }
+    try {
+      const recent = this.db.query(`
+        SELECT content_wy FROM openecc_facts
+        WHERE active = 1 AND tier IN ('profile', 'project', 'learned')
+        ORDER BY confidence DESC, updated_at DESC LIMIT 8
+      `).all();
+      if (recent.length) {
+        const lines = ['<structured type="memory_facts">'];
+        for (const f of recent) {
+          const trimmed = f.content_wy.trim();
+          if (trimmed)
+            lines.push(trimmed);
+        }
+        lines.push("</structured>");
+        blocks.push(lines.join(`
+`));
+      }
+    } catch {}
+    if (query) {
+      const results = this.recall(query, 5);
+      if (results.facts.length) {
+        const lines = ['<structured type="memory_retrieved">'];
+        for (const f of results.facts) {
+          const conf = f.confidence.toFixed(1);
+          lines.push(`  F|${f.scope}|${f.key}=${f.value}|c:${conf}`);
+        }
+        lines.push("</structured>");
+        blocks.push(lines.join(`
+`));
+      }
+    }
+    return blocks.join(`
+
+`);
+  }
+  wyFilePath(name) {
+    return path6.join(this.memoryDir, name);
+  }
+  readWyFile(name) {
+    try {
+      return wy_decode(fs6.readFileSync(this.wyFilePath(name), "utf8"));
+    } catch {
+      return [];
+    }
+  }
+  writeWyFile(name, entries) {
+    const fp = this.wyFilePath(name);
+    const tmp = fp + ".tmp." + process.pid;
+    fs6.writeFileSync(tmp, wy_encode(entries));
+    fs6.renameSync(tmp, fp);
+  }
+  readProfile() {
+    return this.readWyFile(PROFILE_USER);
+  }
+  readProject() {
+    return this.readWyFile(PROFILE_PROJECT);
+  }
+  writeProfile(entries) {
+    if (entries.length > MAX_PROFILE_ENTRIES)
+      entries = entries.slice(-MAX_PROFILE_ENTRIES);
+    this.writeWyFile(PROFILE_USER, entries);
+  }
+  writeProject(entries) {
+    if (entries.length > MAX_PROJECT_ENTRIES)
+      entries = entries.slice(-MAX_PROJECT_ENTRIES);
+    this.writeWyFile(PROFILE_PROJECT, entries);
+  }
+  appendProfileFact(key, value) {
+    const entries = this.readProfile();
+    const filtered = entries.filter((e) => !(e.type === "F" && e.fields[0] === "usr" && e.fields[1] === key));
+    filtered.push(wy_fact("usr", key, value));
+    this.writeProfile(filtered);
+  }
+  appendProjectFact(key, value) {
+    const entries = this.readProject();
+    const filtered = entries.filter((e) => !(e.type === "F" && e.fields[0] === "prj" && e.fields[1] === key));
+    filtered.push(wy_fact("prj", key, value));
+    this.writeProject(filtered);
+  }
+  consolidate() {
+    const db = this.ensure();
+    let merged = 0;
+    const dups = db.query(`
+      SELECT scope, key, COUNT(*) as cnt FROM openecc_facts
+      WHERE active = 1 GROUP BY scope, key HAVING cnt > 1
+    `).all();
+    for (const d of dups) {
+      const rows = db.query(`
+        SELECT id, confidence, updated_at FROM openecc_facts
+        WHERE active = 1 AND scope = ? AND key = ?
+        ORDER BY updated_at DESC
+      `).all(d.scope, d.key);
+      if (rows.length <= 1)
+        continue;
+      const [keep, ...stale] = rows;
+      for (const s of stale) {
+        db.run("UPDATE openecc_facts SET active = 0, supersedes_id = ?, updated_at = ? WHERE id = ?", [keep.id, Date.now(), s.id]);
+        merged++;
+      }
+      const avgConf = rows.reduce((sum, r) => sum + r.confidence, 0) / rows.length;
+      const boost = Math.min(avgConf + 0.1, 1);
+      db.run("UPDATE openecc_facts SET confidence = ?, updated_at = ? WHERE id = ?", [boost, Date.now(), keep.id]);
+    }
+    return merged;
+  }
+  decay() {
+    const db = this.ensure();
+    const cutoff = Date.now() - 90 * 86400 * 1000;
+    const result = db.run(`UPDATE openecc_facts SET active = 0, updated_at = ?
+       WHERE active = 1 AND tier IN ('episodic', 'working') AND updated_at < ? AND confidence < 0.3`, [Date.now(), cutoff]);
+    return result.changes;
+  }
+  compactEntries(maxAgeDays = 90) {
+    const db = this.ensure();
+    const cutoff = Date.now() - maxAgeDays * 86400 * 1000;
+    const result = db.run("DELETE FROM openecc_entries WHERE created_at < ?", [cutoff]);
+    return result.changes;
+  }
+  optimize() {
+    const cmds = [
+      "openecc_entries_fts",
+      "openecc_facts_fts",
+      "openecc_summaries_fts"
+    ];
+    for (const tbl of cmds) {
+      try {
+        this.db.exec(`INSERT INTO ${tbl}(${tbl}) VALUES ('optimize')`);
+      } catch {}
+    }
+  }
+  runMaintenance() {
+    const consolidated = this.consolidate();
+    const decayed = this.decay();
+    const archived = this.compactEntries();
+    this.optimize();
+    return { consolidated, decayed, archived };
+  }
+  stats() {
+    this.ensure();
+    function count(db, sql) {
+      try {
+        return db.query(sql).get()?.c ?? 0;
+      } catch {
+        return 0;
+      }
+    }
+    let dbSize = 0;
+    try {
+      dbSize = fs6.statSync(this.wyFilePath(MEMORY_DB)).size;
+    } catch {}
+    return {
+      entries: count(this.db, "SELECT COUNT(*) as c FROM openecc_entries"),
+      facts: count(this.db, "SELECT COUNT(*) as c FROM openecc_facts WHERE active = 1"),
+      summaries: count(this.db, "SELECT COUNT(*) as c FROM openecc_summaries"),
+      db_size: dbSize,
+      profile_entries: this.readProfile().length,
+      project_entries: this.readProject().length
+    };
+  }
+}
+var _store = null;
+function getStore() {
+  if (!_store) {
+    _store = new MemoryStore;
+    _store.open();
+  }
+  return _store;
+}
+function closeStore() {
+  if (_store) {
+    _store.close();
+    _store = null;
+  }
+}
+var memory_recall = tool({
+  description: "Search persistent local memory for facts, decisions, and context from this or previous sessions. Results include stable profile facts, learned facts, past summaries, and journal entries. Call this when you need to recall user preferences, project conventions, past decisions, or any contextual information the model may not remember.",
+  args: {
+    query: tool.schema.string().describe("Keywords or phrases to search memory for"),
+    limit: tool.schema.number().optional().describe("Max results (default 10)")
+  },
+  async execute(args, context) {
+    const store = getStore();
+    const results = store.recall(args.query, args.limit ?? MAX_RECALL);
+    const parts = [];
+    if (results.facts.length) {
+      parts.push("## Memory Facts");
+      for (const f of results.facts) {
+        const tier = f.tier;
+        parts.push(`- [${tier}] ${f.scope}:${f.key}=${f.value}  (confidence: ${f.confidence.toFixed(1)})`);
+      }
+    }
+    if (results.summaries.length) {
+      parts.push("## Past Summaries");
+      for (const s of results.summaries) {
+        const wy = s.content_wy.trim();
+        parts.push(`- [${s.kind}] ${wy}`);
+      }
+    }
+    if (results.entries.length) {
+      parts.push("## Journal Entries");
+      for (const e of results.entries) {
+        const preview = e.content.length > 200 ? e.content.slice(0, 200) + "\u2026" : e.content;
+        parts.push(`- [${e.kind}] ${preview}`);
+      }
+    }
+    if (!parts.length)
+      return "No matching memory found.";
+    return parts.join(`
+
+`);
+  }
+});
+var memory_status = tool({
+  description: "View memory system health: entry count, fact count, database size, and profile size. Run this to check if memory is working or diagnose storage issues.",
+  args: {},
+  async execute(_args, context) {
+    const store = getStore();
+    const s = store.stats();
+    return [
+      "## Memory Status",
+      `- Entries: ${s.entries}`,
+      `- Active facts: ${s.facts}`,
+      `- Summaries: ${s.summaries}`,
+      `- Database: ${formatBytes(s.db_size)}`,
+      `- Profile entries: ${s.profile_entries}`,
+      `- Project entries: ${s.project_entries}`,
+      "\u2014",
+      "Self-maintaining. No manual cleanup needed."
+    ].join(`
+`);
+  }
+});
+function formatBytes(bytes) {
+  if (bytes < 1024)
+    return bytes + " B";
+  if (bytes < 1048576)
+    return (bytes / 1024).toFixed(1) + " KB";
+  return (bytes / 1048576).toFixed(1) + " MB";
+}
+function buildMemoryContinuityBlock() {
+  const store = getStore();
+  const ctx = store.buildMemoryContext();
+  if (!ctx)
+    return "";
+  return [
+    "## OpenECC Memory Context (preserve across compaction)",
+    "",
+    "This block holds persistent memory \u2014 facts, profile, and project context.",
+    "It survives compaction and grows more useful over time.",
+    "",
+    ctx
+  ].join(`
+`);
+}
+function onSessionCreated(sessionId) {
+  const store = getStore();
+  store.captureEntry(sessionId, "session", "session_start");
+  store.runMaintenance();
+}
+function onSessionDeleted() {
+  closeStore();
+}
+function onFileEdited(filePath) {
+  const store = getStore();
+  store.captureEntry("", "file", filePath, "file.edited");
+}
+function onToolExecuted(toolName, args) {
+  const entryPoint = args?.filePath || args?.command || "";
+  if (entryPoint) {
+    const store = getStore();
+    store.captureEntry("", "tool", `${toolName}: ${entryPoint}`, toolName);
+  }
+}
+
 // src/plugin.ts
-var __dirname4 = path6.dirname(fileURLToPath3(import.meta.url));
-var agentsMDPath = path6.resolve(__dirname4, "..", "..", "AGENTS.md");
+var __dirname4 = path7.dirname(fileURLToPath3(import.meta.url));
+var agentsMDPath = path7.resolve(__dirname4, "..", "..", "AGENTS.md");
 function readFileSafe3(filePath) {
   try {
-    return fs6.readFileSync(filePath, "utf8");
+    return fs7.readFileSync(filePath, "utf8");
   } catch {
     return "";
   }
@@ -1140,27 +1735,27 @@ function stripYamlFrontmatter2(content) {
   return content.replace(/^---[\s\S]*?---\n/, "");
 }
 function detectProject(cwd) {
-  let projectName = path6.basename(cwd);
+  let projectName = path7.basename(cwd);
   try {
-    const pkg = JSON.parse(fs6.readFileSync(path6.join(cwd, "package.json"), "utf8"));
+    const pkg = JSON.parse(fs7.readFileSync(path7.join(cwd, "package.json"), "utf8"));
     if (pkg.name)
       projectName = pkg.name;
   } catch {}
   const languages = [];
-  if (fs6.existsSync(path6.join(cwd, "tsconfig.json")))
+  if (fs7.existsSync(path7.join(cwd, "tsconfig.json")))
     languages.push("typescript");
-  if (fs6.existsSync(path6.join(cwd, "go.mod")))
+  if (fs7.existsSync(path7.join(cwd, "go.mod")))
     languages.push("go");
-  if (fs6.existsSync(path6.join(cwd, "Cargo.toml")))
+  if (fs7.existsSync(path7.join(cwd, "Cargo.toml")))
     languages.push("rust");
-  if (fs6.existsSync(path6.join(cwd, "pyproject.toml")))
+  if (fs7.existsSync(path7.join(cwd, "pyproject.toml")))
     languages.push("python");
-  if (fs6.existsSync(path6.join(cwd, "package.json")))
+  if (fs7.existsSync(path7.join(cwd, "package.json")))
     languages.push("javascript");
   const lockfiles = { "bun.lock": "bun", "bun.lockb": "bun", "pnpm-lock.yaml": "pnpm", "yarn.lock": "yarn", "package-lock.json": "npm" };
   let packageManager = "npm";
   for (const [lock, name] of Object.entries(lockfiles)) {
-    if (fs6.existsSync(path6.join(cwd, lock))) {
+    if (fs7.existsSync(path7.join(cwd, lock))) {
       packageManager = name;
       break;
     }
@@ -1242,6 +1837,10 @@ var OpenECCPlugin = async ({ client, directory, worktree }) => {
       if (input.toolID === "bash") {
         output.description = `[OPENECC ENFORCEMENT] All commands must run inside a subagent. | ${output.description}`;
       }
+    },
+    tool: {
+      memory_recall,
+      memory_status
     },
     "command.execute.before": async (input, output) => {
       if (input.command === "plan") {
@@ -1353,7 +1952,7 @@ $ARGUMENTS`,
       if (!projectProfile)
         projectProfile = detectProject(worktreePath);
       const pkg = getPackageInfo();
-      const soulPath = path6.join(pkg.skillsDir, "soul", "SKILL.md");
+      const soulPath = path7.join(pkg.skillsDir, "soul", "SKILL.md");
       const soulContent = readFileSafe3(soulPath);
       const cleanSoul = stripYamlFrontmatter2(soulContent);
       const identityBlock = `<EXTREMELY_IMPORTANT>
@@ -1473,24 +2072,43 @@ ${firstText.text}`;
           output.context.push(`- ${f}`);
         output.context.push("");
       }
+      try {
+        const memBlock = buildMemoryContinuityBlock();
+        if (memBlock)
+          output.context.push(memBlock);
+      } catch {}
     },
     "file.edited": async (event) => {
       editedFiles.add(event.path);
+      try {
+        onFileEdited(event.path);
+      } catch {}
     },
     "tool.execute.after": async (input, _output) => {
       const filePath = input.args?.filePath;
-      if ((input.tool === "edit" || input.tool === "write") && filePath)
+      if ((input.tool === "edit" || input.tool === "write") && filePath) {
         editedFiles.add(filePath);
+        try {
+          onToolExecuted(input.tool, input.args);
+        } catch {}
+      }
     },
-    "session.created": async () => {
+    "session.created": async (event) => {
       const pkg = getPackageInfo();
+      const sessionId = event?.sessionID ?? event?.id ?? "";
       await client.app.log({ body: { service: "openecc", level: "info", message: `Session started \u2014 OpenECC v${pkg.version} active` } });
       try {
         migrateOpeneccState(worktreePath);
       } catch {}
+      try {
+        onSessionCreated(sessionId);
+      } catch {}
     },
     "session.deleted": async () => {
       editedFiles.clear();
+      try {
+        onSessionDeleted();
+      } catch {}
     }
   };
 };
