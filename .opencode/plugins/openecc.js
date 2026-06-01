@@ -1,8 +1,8 @@
 // @bun
 // src/plugin.ts
-import * as path3 from "path";
-import * as fs3 from "fs";
-import { fileURLToPath as fileURLToPath2 } from "url";
+import * as path6 from "path";
+import * as fs6 from "fs";
+import { fileURLToPath as fileURLToPath3 } from "url";
 
 // src/plan-gate.ts
 import * as fs2 from "fs";
@@ -684,6 +684,152 @@ plan_notes:
   }
 }
 
+// src/instinct.ts
+import * as fs3 from "fs";
+import * as path3 from "path";
+var VALID_SOURCES = ["git-history", "session-learning", "manual"];
+var VALID_STATUSES = ["active", "pending-review", "deprecated"];
+var STATUS_DISPLAY = [["active", "Active"], ["pending-review", "Pending Review"], ["deprecated", "Deprecated"]];
+var KNOWN_KEYS = new Set(["name", "description", "source", "repetitions", "status", "domain", "tags"]);
+function unquote(s) {
+  s = s.trim();
+  if (s.startsWith('"') && s.endsWith('"') || s.startsWith("'") && s.endsWith("'")) {
+    return s.slice(1, -1);
+  }
+  return s;
+}
+function parseInstinctYaml(raw) {
+  try {
+    const result = {
+      name: "",
+      description: "",
+      source: "manual",
+      repetitions: 1,
+      status: "active",
+      domain: "general",
+      tags: []
+    };
+    const lines = raw.split(`
+`);
+    let currentKey = null;
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith("#"))
+        continue;
+      const kv = trimmed.match(/^(\w[\w-]*):\s*(.*)$/);
+      if (kv) {
+        currentKey = kv[1];
+        const val = kv[2].trim();
+        if (currentKey === "repetitions") {
+          const n = parseInt(val, 10);
+          if (!isNaN(n) && n >= 0)
+            result.repetitions = n;
+        } else if (currentKey === "tags") {
+          result.tags = [];
+        } else if (currentKey === "source") {
+          if (isValidSource(val))
+            result.source = val;
+        } else if (currentKey === "status") {
+          if (isValidStatus(val))
+            result.status = val;
+        } else if (KNOWN_KEYS.has(currentKey)) {
+          result[currentKey] = unquote(val);
+        }
+      } else if (currentKey === "tags" && trimmed.startsWith("- ")) {
+        const tags = result.tags;
+        tags.push(trimmed.slice(2));
+      }
+    }
+    if (!result.name)
+      return null;
+    return {
+      name: result.name,
+      description: result.description,
+      source: result.source,
+      repetitions: result.repetitions,
+      status: result.status,
+      domain: result.domain,
+      tags: result.tags
+    };
+  } catch {
+    return null;
+  }
+}
+function isValidSource(val) {
+  return VALID_SOURCES.includes(val);
+}
+function isValidStatus(val) {
+  return VALID_STATUSES.includes(val);
+}
+function readInstincts(worktreePath) {
+  const dir = path3.join(worktreePath, ".opencode", "instincts");
+  try {
+    if (!fs3.existsSync(dir))
+      return [];
+    const entries = fs3.readdirSync(dir, { withFileTypes: true });
+    const results = [];
+    for (const entry of entries) {
+      if (!entry.isFile() || !entry.name.endsWith(".yaml"))
+        continue;
+      const raw = readFileSafe(path3.join(dir, entry.name));
+      if (!raw)
+        continue;
+      const instinct = parseInstinctYaml(raw);
+      if (instinct)
+        results.push(instinct);
+    }
+    return results;
+  } catch {
+    return [];
+  }
+}
+function readFileSafe(filePath) {
+  try {
+    return fs3.readFileSync(filePath, "utf8");
+  } catch {
+    return "";
+  }
+}
+function instinctConfidence(repetitions) {
+  const base = Math.min(Math.round(repetitions / 10 * 100), 100);
+  const bonus = repetitions >= 5 ? 0 : repetitions >= 3 ? 20 : repetitions >= 1 ? 10 : 0;
+  return Math.min(base + bonus, 100);
+}
+function buildInstinctStatusTable(instincts) {
+  if (instincts.length === 0)
+    return "No instincts found in `.opencode/instincts/`.";
+  const lines = [`## Instinct Status
+`];
+  const grouped = Object.fromEntries(STATUS_DISPLAY.map(([k]) => [k, []]));
+  const domainCount = {};
+  for (const inst of instincts) {
+    const key = inst.status || "active";
+    if (!grouped[key])
+      grouped[key] = [];
+    grouped[key].push(inst);
+    domainCount[inst.domain] = (domainCount[inst.domain] || 0) + 1;
+  }
+  for (const [statusLabel, label] of STATUS_DISPLAY) {
+    const items = grouped[statusLabel] || [];
+    if (items.length === 0)
+      continue;
+    lines.push(`### ${label} (${items.length})`);
+    for (const inst of items) {
+      const capped = instinctConfidence(inst.repetitions);
+      lines.push(`- **${inst.name}** \u2014 ${inst.description}`, `  Source: ${inst.source} | Confidence: ${capped}% (${inst.repetitions} rep${inst.repetitions === 1 ? "" : "s"}) | Status: ${inst.status}`);
+    }
+    lines.push("");
+  }
+  lines.push("**Summary by Domain:**");
+  const sorted = Object.entries(domainCount).sort((a, b) => b[1] - a[1]);
+  for (const [domain, count] of sorted) {
+    lines.push(`- ${domain}: ${count} instinct${count === 1 ? "" : "s"}`);
+  }
+  lines.push(`- **Total: ${instincts.length}**`);
+  return lines.join(`
+`);
+}
+
 // src/execution.ts
 var _ctx = {
   attempt: 0,
@@ -711,33 +857,106 @@ ${yaml}
 </structured>`;
 }
 
-// src/plugin.ts
-var __dirname3 = path3.dirname(fileURLToPath2(import.meta.url));
-var skillsDir = path3.resolve(__dirname3, "..", "skills");
-var agentsDir = path3.resolve(__dirname3, "..", "prompts", "agents");
-var commandsDir = path3.resolve(__dirname3, "..", "commands");
-var agentsMDPath = path3.resolve(__dirname3, "..", "..", "AGENTS.md");
-var discoveredSkillDirs = null;
-function scanSkillDirs(rootDir) {
-  if (discoveredSkillDirs)
-    return discoveredSkillDirs;
-  const results = [];
+// src/model-routing.ts
+import * as fs4 from "fs";
+import * as path4 from "path";
+import * as os2 from "os";
+var DEFAULT_MODEL = "opencode-go/deepseek-v4-flash";
+var REASONING_MODEL = "opencode-go/deepseek-v4-pro";
+var DEFAULT_REASONING_AGENTS = [
+  "planner",
+  "architect",
+  "code-reviewer",
+  "security-reviewer",
+  "tdd-guide",
+  "build-error-resolver",
+  "database-reviewer",
+  "doc-updater",
+  "e2e-runner",
+  "refactor-cleaner",
+  "plan-ceo-reviewer",
+  "plan-design-reviewer",
+  "plan-eng-reviewer",
+  "plan-devex-reviewer",
+  "harness-optimizer"
+];
+function getConfigPath() {
+  const home = process.env.USERPROFILE || os2.homedir();
+  return path4.join(home, ".config", "opencode", "openecc.json");
+}
+function generateDefaultConfig() {
+  const agents = {};
+  for (const name of DEFAULT_REASONING_AGENTS) {
+    agents[name] = REASONING_MODEL;
+  }
+  return {
+    enabled: true,
+    default_model: DEFAULT_MODEL,
+    agents
+  };
+}
+function writeConfig(configPath, config) {
+  const dir = path4.dirname(configPath);
+  if (!fs4.existsSync(dir))
+    fs4.mkdirSync(dir, { recursive: true });
+  fs4.writeFileSync(configPath, JSON.stringify(config, null, 2), "utf8");
+}
+function loadModelRoutingConfig() {
+  const configPath = getConfigPath();
   try {
-    const entries = fs3.readdirSync(rootDir, { withFileTypes: true });
-    for (const entry of entries) {
-      if (!entry.isDirectory())
-        continue;
-      if (fs3.existsSync(path3.join(rootDir, entry.name, "SKILL.md"))) {
-        results.push(path3.join(rootDir, entry.name));
+    if (fs4.existsSync(configPath)) {
+      const raw = fs4.readFileSync(configPath, "utf8").trim();
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (parsed.enabled === undefined)
+          parsed.enabled = true;
+        return parsed;
       }
     }
   } catch {}
-  discoveredSkillDirs = results;
-  return results;
+  const defaults = generateDefaultConfig();
+  writeConfig(configPath, defaults);
+  return defaults;
 }
-function readFileSafe(filePath) {
+function applyModelRouting(config, routing) {
+  if (!routing)
+    routing = loadModelRoutingConfig();
+  if (!routing.enabled)
+    return;
+  const defaultModel = routing.default_model || DEFAULT_MODEL;
+  const agentModels = routing.agents || {};
+  for (const [name, agentConfig] of Object.entries(config.agent || {})) {
+    const agent = agentConfig;
+    if (agent.model)
+      continue;
+    agent.model = agentModels[name] || defaultModel;
+  }
+}
+
+// src/discovery.ts
+import * as path5 from "path";
+import * as fs5 from "fs";
+import * as os3 from "os";
+import { fileURLToPath as fileURLToPath2 } from "url";
+function findPluginRoot(fromDir) {
+  for (let i = 0;i < 5; i++) {
+    if (fs5.existsSync(path5.join(fromDir, "package.json")))
+      return fromDir;
+    const parent = path5.resolve(fromDir, "..");
+    if (parent === fromDir)
+      break;
+    fromDir = parent;
+  }
+  return path5.resolve(fromDir, "..", "..");
+}
+var __dirname3 = path5.dirname(fileURLToPath2(import.meta.url));
+var pluginRoot = findPluginRoot(__dirname3);
+var BUNDLED_AGENTS_DIR = path5.join(pluginRoot, ".opencode", "prompts", "agents");
+var BUNDLED_COMMANDS_DIR = path5.join(pluginRoot, ".opencode", "commands");
+var BUNDLED_SKILLS_DIR = path5.join(pluginRoot, ".opencode", "skills");
+function readFileSafe2(filePath) {
   try {
-    return fs3.readFileSync(filePath, "utf8");
+    return fs5.readFileSync(filePath, "utf8");
   } catch {
     return "";
   }
@@ -745,28 +964,197 @@ function readFileSafe(filePath) {
 function stripYamlFrontmatter(content) {
   return content.replace(/^---[\s\S]*?---\n/, "");
 }
-function detectProject(cwd) {
-  let projectName = path3.basename(cwd);
+function parseCommandFrontmatter(content) {
+  const match = content.match(/^---\n([\s\S]*?)\n---/);
+  if (!match)
+    return {};
+  const result = {};
+  for (const line of match[1].split(`
+`)) {
+    const kv = line.match(/^(\w+):\s*(.+)$/);
+    if (kv) {
+      let value = kv[2].trim();
+      if (value === "true")
+        value = true;
+      else if (value === "false")
+        value = false;
+      else if (value.startsWith('"') && value.endsWith('"'))
+        value = value.slice(1, -1);
+      result[kv[1]] = value;
+    }
+  }
+  return result;
+}
+function inferAgentDesc(name, prompt) {
+  const firstLine = prompt.split(`
+`)[0]?.trim() || "";
+  if (firstLine) {
+    return firstLine.replace(/^You are an?\s+/i, "").replace(/\.$/, "");
+  }
+  return name.replace(/-/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+}
+function inferAgentPermission(name) {
+  if (name === "search-agent" || name === "docs-lookup") {
+    return { edit: "deny", write: "deny", bash: "deny", task: "deny" };
+  }
+  if (name === "code-reviewer" || name === "planner" || name === "architect" || name.startsWith("plan-") && name.endsWith("-reviewer")) {
+    return { edit: "deny", write: "deny", task: "deny" };
+  }
+  return;
+}
+function homeDir() {
+  return process.env.USERPROFILE || os3.homedir();
+}
+function scanAgentDir(dir, source) {
+  const results = [];
   try {
-    const pkg = JSON.parse(fs3.readFileSync(path3.join(cwd, "package.json"), "utf8"));
+    const entries = fs5.readdirSync(dir, { withFileTypes: true });
+    for (const entry of entries) {
+      if (!entry.isFile() || !entry.name.endsWith(".txt"))
+        continue;
+      const name = entry.name.slice(0, -4);
+      const prompt = readFileSafe2(path5.join(dir, entry.name));
+      if (!prompt)
+        continue;
+      results.push({ name, desc: inferAgentDesc(name, prompt), prompt, permission: inferAgentPermission(name), source });
+    }
+  } catch {}
+  return results;
+}
+function scanCommandDir(dir, source) {
+  const results = [];
+  try {
+    const entries = fs5.readdirSync(dir, { withFileTypes: true });
+    for (const entry of entries) {
+      if (!entry.isFile() || !entry.name.endsWith(".md"))
+        continue;
+      const name = entry.name.slice(0, -3);
+      const content = readFileSafe2(path5.join(dir, entry.name));
+      if (!content)
+        continue;
+      const fm = parseCommandFrontmatter(content);
+      const template = stripYamlFrontmatter(content);
+      if (!template)
+        continue;
+      results.push({
+        name,
+        desc: fm.description || name.replace(/-/g, " "),
+        template,
+        agent: fm.agent,
+        subtask: fm.subtask,
+        source
+      });
+    }
+  } catch {}
+  return results;
+}
+function scanSkillDir(dir) {
+  const results = [];
+  try {
+    const entries = fs5.readdirSync(dir, { withFileTypes: true });
+    for (const entry of entries) {
+      if (!entry.isDirectory())
+        continue;
+      if (fs5.existsSync(path5.join(dir, entry.name, "SKILL.md"))) {
+        results.push(path5.join(dir, entry.name));
+      }
+    }
+  } catch {}
+  return results;
+}
+function mergeByName(priorityGroups) {
+  const seen = new Map;
+  for (const group of priorityGroups) {
+    for (const item of group) {
+      if (!seen.has(item.name)) {
+        seen.set(item.name, item);
+      }
+    }
+  }
+  return [...seen.values()];
+}
+function globalDir(sub) {
+  return path5.join(homeDir(), ".config", "opencode", sub);
+}
+function workspaceDir(worktree, sub) {
+  return path5.join(worktree, ".opencode", sub);
+}
+var cachedAgents = null;
+var cachedCommands = null;
+var cachedSkills = null;
+function discoverAgents(worktreePath) {
+  if (cachedAgents)
+    return cachedAgents;
+  cachedAgents = mergeByName([
+    scanAgentDir(BUNDLED_AGENTS_DIR, "openecc"),
+    scanAgentDir(globalDir(path5.join("prompts", "agents")), "global"),
+    scanAgentDir(workspaceDir(worktreePath, path5.join("prompts", "agents")), "workspace")
+  ]);
+  return cachedAgents;
+}
+function discoverCommands(worktreePath) {
+  if (cachedCommands)
+    return cachedCommands;
+  cachedCommands = mergeByName([
+    scanCommandDir(BUNDLED_COMMANDS_DIR, "openecc"),
+    scanCommandDir(globalDir("commands"), "global"),
+    scanCommandDir(workspaceDir(worktreePath, "commands"), "workspace")
+  ]);
+  return cachedCommands;
+}
+function discoverSkills(worktreePath) {
+  if (cachedSkills)
+    return cachedSkills;
+  const bundled = scanSkillDir(BUNDLED_SKILLS_DIR);
+  const global = scanSkillDir(globalDir("skills"));
+  const workspace = scanSkillDir(workspaceDir(worktreePath, "skills"));
+  const seen = new Set;
+  const results = [];
+  for (const dir of [...bundled, ...global, ...workspace]) {
+    if (!seen.has(dir)) {
+      seen.add(dir);
+      results.push(dir);
+    }
+  }
+  cachedSkills = results;
+  return cachedSkills;
+}
+
+// src/plugin.ts
+var __dirname4 = path6.dirname(fileURLToPath3(import.meta.url));
+var agentsMDPath = path6.resolve(__dirname4, "..", "..", "AGENTS.md");
+function readFileSafe3(filePath) {
+  try {
+    return fs6.readFileSync(filePath, "utf8");
+  } catch {
+    return "";
+  }
+}
+function stripYamlFrontmatter2(content) {
+  return content.replace(/^---[\s\S]*?---\n/, "");
+}
+function detectProject(cwd) {
+  let projectName = path6.basename(cwd);
+  try {
+    const pkg = JSON.parse(fs6.readFileSync(path6.join(cwd, "package.json"), "utf8"));
     if (pkg.name)
       projectName = pkg.name;
   } catch {}
   const languages = [];
-  if (fs3.existsSync(path3.join(cwd, "tsconfig.json")))
+  if (fs6.existsSync(path6.join(cwd, "tsconfig.json")))
     languages.push("typescript");
-  if (fs3.existsSync(path3.join(cwd, "go.mod")))
+  if (fs6.existsSync(path6.join(cwd, "go.mod")))
     languages.push("go");
-  if (fs3.existsSync(path3.join(cwd, "Cargo.toml")))
+  if (fs6.existsSync(path6.join(cwd, "Cargo.toml")))
     languages.push("rust");
-  if (fs3.existsSync(path3.join(cwd, "pyproject.toml")))
+  if (fs6.existsSync(path6.join(cwd, "pyproject.toml")))
     languages.push("python");
-  if (fs3.existsSync(path3.join(cwd, "package.json")))
+  if (fs6.existsSync(path6.join(cwd, "package.json")))
     languages.push("javascript");
   const lockfiles = { "bun.lock": "bun", "bun.lockb": "bun", "pnpm-lock.yaml": "pnpm", "yarn.lock": "yarn", "package-lock.json": "npm" };
   let packageManager = "npm";
   for (const [lock, name] of Object.entries(lockfiles)) {
-    if (fs3.existsSync(path3.join(cwd, lock))) {
+    if (fs6.existsSync(path6.join(cwd, lock))) {
       packageManager = name;
       break;
     }
@@ -833,86 +1221,6 @@ var COMPLETION_CONTRACT = `### Before responding
 2. Did you verify results (not assume)?
 3. Is the response concise and synthesized?
 When done: place \`---\` followed by **Status:** \u2705 Done | \uD83D\uDEA7 Blocked | \uD83D\uDD04 In Progress`;
-function inferAgentPermission(name) {
-  if (name === "search-agent" || name === "docs-lookup") {
-    return { edit: "deny", write: "deny", bash: "deny", task: "deny" };
-  }
-  if (name === "code-reviewer" || name === "planner" || name === "architect" || name.startsWith("plan-") && name.endsWith("-reviewer")) {
-    return { edit: "deny", write: "deny", task: "deny" };
-  }
-  return;
-}
-function inferAgentDesc(name, prompt) {
-  const firstLine = prompt.split(`
-`)[0]?.trim() || "";
-  if (firstLine) {
-    return firstLine.replace(/^You are an?\s+/i, "").replace(/\.$/, "");
-  }
-  return name.replace(/-/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
-}
-function scanAgents(dir) {
-  const results = [];
-  try {
-    const entries = fs3.readdirSync(dir, { withFileTypes: true });
-    for (const entry of entries) {
-      if (!entry.isFile() || !entry.name.endsWith(".txt"))
-        continue;
-      const name = entry.name.slice(0, -4);
-      const prompt = readFileSafe(path3.join(dir, entry.name));
-      if (!prompt)
-        continue;
-      results.push({ name, desc: inferAgentDesc(name, prompt), permission: inferAgentPermission(name), prompt });
-    }
-  } catch {}
-  return results;
-}
-function parseCommandFrontmatter(content) {
-  const match = content.match(/^---\n([\s\S]*?)\n---/);
-  if (!match)
-    return {};
-  const result = {};
-  for (const line of match[1].split(`
-`)) {
-    const kv = line.match(/^(\w+):\s*(.+)$/);
-    if (kv) {
-      let value = kv[2].trim();
-      if (value === "true")
-        value = true;
-      else if (value === "false")
-        value = false;
-      else if (value.startsWith('"') && value.endsWith('"'))
-        value = value.slice(1, -1);
-      result[kv[1]] = value;
-    }
-  }
-  return result;
-}
-function scanCommands(dir) {
-  const results = [];
-  try {
-    const entries = fs3.readdirSync(dir, { withFileTypes: true });
-    for (const entry of entries) {
-      if (!entry.isFile() || !entry.name.endsWith(".md"))
-        continue;
-      const name = entry.name.slice(0, -3);
-      const content = readFileSafe(path3.join(dir, entry.name));
-      if (!content)
-        continue;
-      const fm = parseCommandFrontmatter(content);
-      const template = stripYamlFrontmatter(content);
-      if (!template)
-        continue;
-      results.push({
-        name,
-        desc: fm.description || name.replace(/-/g, " "),
-        agent: fm.agent,
-        subtask: fm.subtask,
-        template
-      });
-    }
-  } catch {}
-  return results;
-}
 var OpenECCPlugin = async ({ client, directory, worktree }) => {
   const worktreePath = worktree || directory;
   let projectProfile = null;
@@ -977,9 +1285,9 @@ var OpenECCPlugin = async ({ client, directory, worktree }) => {
             output.parts = [{ type: "text", text: "Usage: /plan transition <id> <status>", id: "", sessionID: "", messageID: "" }];
             return;
           }
-          const VALID_STATUSES = ["draft", "approved", "in_progress", "done", "blocked", "abandoned"];
-          if (!VALID_STATUSES.includes(newStatus)) {
-            output.parts = [{ type: "text", text: `Invalid status: "${newStatus}". Valid: ${VALID_STATUSES.join(", ")}`, id: "", sessionID: "", messageID: "" }];
+          const VALID_STATUSES2 = ["draft", "approved", "in_progress", "done", "blocked", "abandoned"];
+          if (!VALID_STATUSES2.includes(newStatus)) {
+            output.parts = [{ type: "text", text: `Invalid status: "${newStatus}". Valid: ${VALID_STATUSES2.join(", ")}`, id: "", sessionID: "", messageID: "" }];
             return;
           }
           const err = updatePlanStatus(worktreePath, pid, newStatus);
@@ -988,20 +1296,30 @@ var OpenECCPlugin = async ({ client, directory, worktree }) => {
         }
         output.parts = [{ type: "text", text: `Unknown: ${sub}. Try: list, status, create, transition`, id: "", sessionID: "", messageID: "" }];
       }
+      if (input.command === "instinct") {
+        const instArgs = input.arguments?.trim() || "";
+        const instParts = instArgs.split(/\s+/);
+        const sub = instParts[0]?.toLowerCase();
+        if (sub === "status" || !sub) {
+          const instincts = readInstincts(worktreePath);
+          output.parts = [{ type: "text", text: buildInstinctStatusTable(instincts), id: "", sessionID: "", messageID: "" }];
+          return;
+        }
+        output.parts = [{ type: "text", text: `Unknown instinct subcommand: "${sub}". Try: status`, id: "", sessionID: "", messageID: "" }];
+      }
     },
     config: async (config) => {
       config.skills = config.skills || {};
       config.skills.paths = config.skills.paths || [];
-      for (const skillDir of scanSkillDirs(skillsDir)) {
+      for (const skillDir of discoverSkills(worktreePath)) {
         if (!config.skills.paths.includes(skillDir))
           config.skills.paths.push(skillDir);
       }
       config.instructions = config.instructions || [];
       if (!config.instructions.some((i) => i === agentsMDPath))
         config.instructions.push(agentsMDPath);
-      const discoveredAgents = scanAgents(agentsDir);
       config.agent = config.agent || {};
-      for (const agent of discoveredAgents) {
+      for (const agent of discoverAgents(worktreePath)) {
         if (!config.agent[agent.name]) {
           const agentConfig = { description: agent.desc, mode: "subagent", prompt: agent.prompt };
           if (agent.permission)
@@ -1009,9 +1327,10 @@ var OpenECCPlugin = async ({ client, directory, worktree }) => {
           config.agent[agent.name] = agentConfig;
         }
       }
-      const discoveredCommands = scanCommands(commandsDir);
+      loadModelRoutingConfig();
+      applyModelRouting(config);
       config.command = config.command || {};
-      for (const cmd of discoveredCommands) {
+      for (const cmd of discoverCommands(worktreePath)) {
         if (!config.command[cmd.name]) {
           config.command[cmd.name] = {
             description: cmd.desc,
@@ -1028,9 +1347,9 @@ $ARGUMENTS`,
       if (!projectProfile)
         projectProfile = detectProject(worktreePath);
       const pkg = getPackageInfo();
-      const soulPath = path3.join(skillsDir, "soul", "SKILL.md");
-      const soulContent = readFileSafe(soulPath);
-      const cleanSoul = stripYamlFrontmatter(soulContent);
+      const soulPath = path6.join(pkg.skillsDir, "soul", "SKILL.md");
+      const soulContent = readFileSafe3(soulPath);
+      const cleanSoul = stripYamlFrontmatter2(soulContent);
       const identityBlock = `<EXTREMELY_IMPORTANT>
 I am OpenECC, your engineering workflow layer.
 

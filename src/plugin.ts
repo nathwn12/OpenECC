@@ -9,36 +9,14 @@ import {
   type PlanIndex, type PlanIndexEntry,
 } from "./plan-gate"
 import { getPackageInfo, getOpenEccVersion } from "./identity"
+import { readInstincts, buildInstinctStatusTable } from "./instinct"
 
 import { incrementAttempt, buildExecutionContextBlock } from "./execution"
+import { loadModelRoutingConfig, applyModelRouting } from "./model-routing"
+import { discoverAgents, discoverCommands, discoverSkills } from "./discovery"
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
-const skillsDir = path.resolve(__dirname, "..", "skills")
-const agentsDir = path.resolve(__dirname, "..", "prompts", "agents")
-const commandsDir = path.resolve(__dirname, "..", "commands")
 const agentsMDPath = path.resolve(__dirname, "..", "..", "AGENTS.md")
-
-// ── Skill Detection Cache ────────────────────────────────────────────────
-
-let discoveredSkillDirs: string[] | null = null
-
-function scanSkillDirs(rootDir: string): string[] {
-  if (discoveredSkillDirs) return discoveredSkillDirs
-  const results: string[] = []
-  try {
-    const entries = fs.readdirSync(rootDir, { withFileTypes: true })
-    for (const entry of entries) {
-      if (!entry.isDirectory()) continue
-      if (fs.existsSync(path.join(rootDir, entry.name, "SKILL.md"))) {
-        results.push(path.join(rootDir, entry.name))
-      }
-    }
-  } catch { /* not a skills root — skip */ }
-  discoveredSkillDirs = results
-  return results
-}
-
-// ── Helpers ──────────────────────────────────────────────────────────────
 
 function readFileSafe(filePath: string): string {
   try { return fs.readFileSync(filePath, "utf8") } catch { return "" }
@@ -47,6 +25,8 @@ function readFileSafe(filePath: string): string {
 function stripYamlFrontmatter(content: string): string {
   return content.replace(/^---[\s\S]*?---\n/, "")
 }
+
+
 
 interface ProjectProfile {
   projectName: string
@@ -136,83 +116,6 @@ const COMPLETION_CONTRACT = `### Before responding
 3. Is the response concise and synthesized?
 When done: place \`---\` followed by **Status:** ✅ Done | 🚧 Blocked | 🔄 In Progress`
 
-// ── Dynamic Agent/Command Discovery ───────────────────────────────────
-
-function inferAgentPermission(name: string): Record<string, string> | undefined {
-  if (name === "search-agent" || name === "docs-lookup") {
-    return { edit: "deny", write: "deny", bash: "deny", task: "deny" }
-  }
-  if (name === "code-reviewer" || name === "planner" || name === "architect" ||
-      (name.startsWith("plan-") && name.endsWith("-reviewer"))) {
-    return { edit: "deny", write: "deny", task: "deny" }
-  }
-  return undefined
-}
-
-function inferAgentDesc(name: string, prompt: string): string {
-  const firstLine = prompt.split("\n")[0]?.trim() || ""
-  if (firstLine) {
-    return firstLine.replace(/^You are an?\s+/i, "").replace(/\.$/, "")
-  }
-  return name.replace(/-/g, " ").replace(/\b\w/g, c => c.toUpperCase())
-}
-
-function scanAgents(dir: string): Array<{ name: string; desc: string; permission?: Record<string, string>; prompt: string }> {
-  const results: Array<{ name: string; desc: string; permission?: Record<string, string>; prompt: string }> = []
-  try {
-    const entries = fs.readdirSync(dir, { withFileTypes: true })
-    for (const entry of entries) {
-      if (!entry.isFile() || !entry.name.endsWith(".txt")) continue
-      const name = entry.name.slice(0, -4)
-      const prompt = readFileSafe(path.join(dir, entry.name))
-      if (!prompt) continue
-      results.push({ name, desc: inferAgentDesc(name, prompt), permission: inferAgentPermission(name), prompt })
-    }
-  } catch { /* not an agents dir — skip */ }
-  return results
-}
-
-function parseCommandFrontmatter(content: string): Record<string, unknown> {
-  const match = content.match(/^---\n([\s\S]*?)\n---/)
-  if (!match) return {}
-  const result: Record<string, unknown> = {}
-  for (const line of match[1].split("\n")) {
-    const kv = line.match(/^(\w+):\s*(.+)$/)
-    if (kv) {
-      let value: unknown = kv[2].trim()
-      if (value === "true") value = true
-      else if (value === "false") value = false
-      else if ((value as string).startsWith('"') && (value as string).endsWith('"')) value = (value as string).slice(1, -1)
-      result[kv[1]] = value
-    }
-  }
-  return result
-}
-
-function scanCommands(dir: string): Array<{ name: string; desc: string; agent?: string; subtask?: boolean; template: string }> {
-  const results: Array<{ name: string; desc: string; agent?: string; subtask?: boolean; template: string }> = []
-  try {
-    const entries = fs.readdirSync(dir, { withFileTypes: true })
-    for (const entry of entries) {
-      if (!entry.isFile() || !entry.name.endsWith(".md")) continue
-      const name = entry.name.slice(0, -3)
-      const content = readFileSafe(path.join(dir, entry.name))
-      if (!content) continue
-      const fm = parseCommandFrontmatter(content)
-      const template = stripYamlFrontmatter(content)
-      if (!template) continue
-      results.push({
-        name,
-        desc: (fm.description as string) || name.replace(/-/g, " "),
-        agent: fm.agent as string | undefined,
-        subtask: fm.subtask as boolean | undefined,
-        template,
-      })
-    }
-  } catch { /* not a commands dir — skip */ }
-  return results
-}
-
 // ── Plugin Entrypoint ────────────────────────────────────────────────────
 
 export const OpenECCPlugin: Plugin = async ({ client, directory, worktree }) => {
@@ -290,22 +193,31 @@ export const OpenECCPlugin: Plugin = async ({ client, directory, worktree }) => 
         }
         output.parts = [{ type: "text", text: `Unknown: ${sub}. Try: list, status, create, transition`, id: "", sessionID: "", messageID: "" }]
       }
+      if (input.command === "instinct") {
+        const instArgs = input.arguments?.trim() || ""
+        const instParts = instArgs.split(/\s+/)
+        const sub = instParts[0]?.toLowerCase()
+        if (sub === "status" || !sub) {
+          const instincts = readInstincts(worktreePath)
+          output.parts = [{ type: "text", text: buildInstinctStatusTable(instincts), id: "", sessionID: "", messageID: "" }]
+          return
+        }
+        output.parts = [{ type: "text", text: `Unknown instinct subcommand: "${sub}". Try: status`, id: "", sessionID: "", messageID: "" }]
+      }
     },
 
     config: async (config: any) => {
       config.skills = config.skills || {}
       config.skills.paths = config.skills.paths || []
-      // Silent detection: discover individual skills (cached, only scans once)
-      for (const skillDir of scanSkillDirs(skillsDir)) {
+      for (const skillDir of discoverSkills(worktreePath)) {
         if (!config.skills.paths.includes(skillDir)) config.skills.paths.push(skillDir)
       }
 
       config.instructions = config.instructions || []
       if (!config.instructions.some((i: string) => i === agentsMDPath)) config.instructions.push(agentsMDPath)
 
-      const discoveredAgents = scanAgents(agentsDir)
       config.agent = config.agent || {}
-      for (const agent of discoveredAgents) {
+      for (const agent of discoverAgents(worktreePath)) {
         if (!config.agent[agent.name]) {
           const agentConfig: Record<string, unknown> = { description: agent.desc, mode: "subagent", prompt: agent.prompt }
           if (agent.permission) agentConfig.permission = agent.permission
@@ -313,9 +225,12 @@ export const OpenECCPlugin: Plugin = async ({ client, directory, worktree }) => 
         }
       }
 
-      const discoveredCommands = scanCommands(commandsDir)
+      // Model routing via openecc.json
+      loadModelRoutingConfig()
+      applyModelRouting(config)
+
       config.command = config.command || {}
-      for (const cmd of discoveredCommands) {
+      for (const cmd of discoverCommands(worktreePath)) {
         if (!config.command[cmd.name]) {
           config.command[cmd.name] = {
             description: cmd.desc,
@@ -332,7 +247,7 @@ export const OpenECCPlugin: Plugin = async ({ client, directory, worktree }) => 
 
       const pkg = getPackageInfo()
 
-      const soulPath = path.join(skillsDir, "soul", "SKILL.md")
+      const soulPath = path.join(pkg.skillsDir, "soul", "SKILL.md")
       const soulContent = readFileSafe(soulPath)
       const cleanSoul = stripYamlFrontmatter(soulContent)
 

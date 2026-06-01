@@ -14,7 +14,7 @@ Add one line to your `opencode.json`:
 }
 ```
 
-Restart OpenCode. The plugin loads on session start: detects your project, registers 18 agents + 28 commands + 11 skills, injects the soul guidelines, partitions tool access, and activates the plan gate.
+Restart OpenCode. The plugin loads on session start: detects your project, discovers agents/commands/skills from the filesystem, loads model-routing config (`openecc.json`), injects the soul guidelines, partitions tool access, and activates the plan gate.
 
 ---
 
@@ -24,22 +24,31 @@ Restart OpenCode. The plugin loads on session start: detects your project, regis
 src/
 ├── plugin.ts            ← Entrypoint. Hooks session lifecycle, registers everything
 ├── plan-gate.ts         ← Plan state machine, index I/O, intent classification, drift detection
-├── plan-gate.test.ts    ← 63 tests covering state machine, intent, scope, drift, I/O, migration
+├── plan-gate.test.ts    ← State machine, intent, scope, drift, I/O, migration tests
 ├── identity.ts          ← Package info, version, skills path resolution
-└── execution.ts         ← Attempt tracking, execution context block
+├── execution.ts         ← Attempt counter, execution context block
+├── discovery.ts         ← Multi-source agent/command/skill scanner (bundled + global + workspace)
+├── discovery.test.ts    ← Discovery caching, merge priority, multi-source tests
+├── model-routing.ts     ← Loads `openecc.json`, assigns per-agent models, auto-heals
+├── model-routing.test.ts← Config I/O, enable/disable, per-agent overrides
+├── instinct.ts          ← Pattern learning, YAML storage/query, confidence scoring
+└── instinct.test.ts     ← Parsing, read/write, status table, confidence tests
 ```
 
 **How a session starts:**
 
 1. Plugin detects project (languages, package manager)
-2. Scans `.opencode/skills/` for SKILL.md files — auto-registers each skill silently
-3. Injects the **soul** behavioral guidelines into system prompt
-4. Injects **delegation enforcement** (hard rules: main context = TALK + DELEGATE only)
-5. Injects **project profile** (detected langs, package manager)
-6. Injects **plan gate status** + **plan gate block** (active plan with enforcement)
-7. Injects **tool access block** (structured YAML partition)
-8. Registers 18 agents, 28 commands, 11 skills from `.opencode/`
-9. On first user message: **classifies intent** → proportional plan gate → either blocks, auto-creates, or opens gate
+2. Scans `.opencode/skills/` for SKILL.md files — auto-registers each skill silently via `discovery.ts`
+3. Loads `openecc.json` model-routing config — assigns per-agent models, auto-heals if missing
+4. Injects the **identity + runtime** block (version, package root, skills directory)
+5. Injects the **soul** behavioral guidelines into system prompt
+6. Injects **execution context** block (attempt counter, struggle detection)
+7. Injects **delegation enforcement** (hard rules: main context = TALK + DELEGATE only)
+8. Injects **project profile** (detected langs, package manager)
+9. Injects **plan gate status** + **plan gate block** (active plan with enforcement)
+10. Injects **tool access block** (structured YAML partition)
+11. Registers 18 agents (file-discovered), 28 commands (file-discovered), 11 skills from `.opencode/`
+12. On first user message: **classifies intent** → **classifies task scope** → proportional plan gate → either blocks, auto-creates, or opens gate
 
 ---
 
@@ -193,7 +202,7 @@ The plugin enforces strict tool partitioning between main context and subagents:
 | `/eval` | — | Run evaluation against criteria |
 | `/evolve` | — | Cluster instincts into skills |
 | `/harness-audit` | — | Harness configuration audit |
-| `/instinct-status` | — | View learned instincts |
+| `/instinct status` | — | View learned instincts (name, source, confidence, status) |
 | `/instinct-import` | — | Import instincts |
 | `/instinct-export` | — | Export instincts |
 | `/learn` | — | Extract patterns from session |
@@ -250,21 +259,15 @@ Compiles `src/plugin.ts` → `.opencode/plugins/openecc.js` (Bun target, externa
 bun test
 ```
 
-63 tests passing (145 assertions) covering:
-- State machine validation (6 statuses, all valid transitions, all invalid rejections)
-- Intent classification (implement, clarify, review, plan, debug, empty)
-- Task scope classification (trivial, lightweight, complex)
-- Tool access block structure
-- Plan drift detection (in-scope, out-of-scope, empty)
-- Index I/O round-trip (read/write, missing, schema migration)
-- Active plan resolution (null, valid, gate blocking states)
-- Plan creation (summary, tasks, drafts, ID increment, YAML write)
-- Builtin plan creation (3-task template, auto-approve)
-- Plan status transitions (valid, invalid, auto-clear on done)
-- Plan quality assessment (scoring, cycles, missing fields)
-- Plan file I/O (read, delete, nonexistent)
-- Plan deletion (by ID, missing ID, active plan, YAML cleanup)
-- Migration from legacy `.openecc` format
+123 tests passing (312 assertions) across 4 test files covering:
+
+**plan-gate.test.ts** — State machine validation, intent/scope classification, drift detection, index I/O, active plan resolution, plan creation (full + builtin), status transitions, quality assessment, YAML file I/O, plan deletion, legacy migration
+
+**model-routing.test.ts** — Config I/O (read/write/heal), enable/disable toggle, per-agent model overrides, default model assignment
+
+**discovery.test.ts** — Agent/command/skill scanning from bundled/global/workspace sources, priority merging by name, caching, cache clearing
+
+**instinct.test.ts** — YAML parsing (valid/invalid), read/write round-trip, confidence scoring, status table rendering, source/status validation
 
 ### Project Structure
 
@@ -291,9 +294,15 @@ bun test
 src/
 ├── plugin.ts              ← Entrypoint — session hooks, config, transforms
 ├── plan-gate.ts           ← State machine, index I/O, intent, drift, quality
-├── plan-gate.test.ts      ← 63 tests (145 assertions)
+├── plan-gate.test.ts      ← State machine, intent, scope, drift, I/O, migration tests
 ├── identity.ts            ← Package info, skills path resolution
-└── execution.ts           ← Attempt tracking, execution context block
+├── execution.ts           ← Attempt counter, execution context block
+├── discovery.ts           ← Multi-source agent/command/skill scanner
+├── discovery.test.ts      ← Caching, merge priority, multi-source tests
+├── model-routing.ts       ← Loads `openecc.json`, per-agent model overrides
+├── model-routing.test.ts  ← Config I/O, enable/disable, agent overrides
+├── instinct.ts            ← Pattern learning, YAML storage/query
+└── instinct.test.ts       ← Parsing, read/write, confidence tests
 ```
 
 ---

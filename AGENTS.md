@@ -1,77 +1,74 @@
 # OpenECC — OpenCode Plugin
 
-This is an OpenCode plugin, not a user-facing app. It provides engineering workflow automation (agent routing, command templates, project detection, skill auto-loading, proportional plan gate).
+Plugin runs inside OpenCode (not standalone). `bun run bundle` is the only build. No linter or formatter configured.
 
-## Build & Dev
+## Build & Verification
 
-- **Install**: `bun install`
-- **Bundle**: `bun run bundle` — compiles `src/plugin.ts` → `.opencode/plugins/openecc.js` (Bun target, external `@opencode-ai/plugin`)
-- **Test**: `bun test` — runs test suite (63 tests, 145 assertions)
-- **No linter or formatter configured**. Typecheck errors are not gated.
-- **Dist vs reality**: `outDir` in tsconfig is `dist/`, but actual output is `.opencode/plugins/openecc.js` (set in `package.json` `"main"` and `bundle` script)
+| Command | What |
+|---------|------|
+| `bun install` | Install deps |
+| `bun run bundle` | Compiles `src/plugin.ts` → `.opencode/plugins/openecc.js` (Bun target, external `@opencode-ai/plugin`) |
+| `bun test` | 123 tests, 312 assertions across 4 test files |
 
-## Architecture
+**Gotcha**: `tsconfig.outDir` says `dist/`, but actual output is `.opencode/plugins/openecc.js` (set in `package.json` `"main"` and `bundle` script). Do not rely on `dist/`.
 
-`src/plugin.ts` is the single entrypoint. It registers tools, auto-injects system prompts (soul, delegation rules, project profile, plan state, plan gate, tool access block), hooks session events, and exposes commands.
+## Source Modules (11 files in `src/`)
 
-| Directory | Purpose |
-|-----------|---------|
-| `src/` | Plugin TypeScript source (entrypoint: `plugin.ts`) |
-| `src/plan-gate.ts` | Plan state machine, drift detection, intent classification, quality assessment, tool access blocks |
-| `src/identity.ts` | Package info, version, skills path resolution |
-| `src/execution.ts` | Attempt tracking, execution context block |
-| `.opencode/prompts/agents/` | Agent prompt files (18 agents) |
-| `.opencode/commands/` | Command templates (28 commands) |
-| `.opencode/skills/` | SKILL.md files loaded by the plugin (11 skills) |
-| `.opencode/plugins/openecc.js` | Bundled plugin output (git-tracked) |
-| `.opencode/plans/` | Plan state (index.json, plan-00N.yaml) — gitignored |
+| Module | Purpose |
+|--------|---------|
+| `plugin.ts` | Entrypoint — config hook, system transforms, session hooks, command dispatch |
+| `discovery.ts` | Multi-source agent/command/skill scanner (bundled + global + workspace) |
+| `model-routing.ts` | Loads `openecc.json`, assigns per-agent models, auto-heals if missing |
+| `plan-gate.ts` | Plan state machine, intent/scope classification, drift detection, quality |
+| `execution.ts` | Attempt counter, execution context block |
+| `identity.ts` | Package root, version, skills dir resolution |
+| `instinct.ts` | Pattern learning, instinct storage/query |
 
-## How the Plugin Works
+Test files: `plan-gate.test.ts`, `model-routing.test.ts`, `discovery.test.ts`, `instinct.test.ts`
 
-1. On session start, `src/plugin.ts` transforms system prompt, injecting soul principles, delegation rules, project profile, plan state, plan gate block, and `<structured type="tool_access">` blocks.
-2. It scans `.opencode/skills/` for SKILL.md files — pushes each discovered skill directory to `config.skills.paths` (cached, only scans once).
-3. It registers agents (from `.opencode/prompts/agents/`), commands (from `.opencode/commands/`), and skills (from `.opencode/skills/`).
-4. On first user message, it classifies intent → classifies task scope → routes through the proportional plan gate (trivial: proceed, lightweight: auto-create+approve, complex: create draft + block).
-5. If legacy `.openecc/` directory exists on session start, one-time migration runs automatically (`migrateOpeneccState` copies plans + index to `.opencode/`).
-6. AGENTS.md is pushed into `config.instructions` — changes take effect on next session.
+## Discovery System (what an agent would guess wrong)
 
-## Plan Gate Enforcement
+The plugin scans **three sources** per type, priority-merged by name (bundled > global > workspace):
 
-Every implementation request is gated by proportional routing:
+| Source | Agents | Commands | Skills |
+|--------|--------|----------|-------|
+| Bundled | `{pkg}/.opencode/prompts/agents/*.txt` | `{pkg}/.opencode/commands/*.md` | `{pkg}/.opencode/skills/*/SKILL.md` |
+| Global | `~/.config/opencode/prompts/agents/*.txt` | `~/.config/opencode/commands/*.md` | `~/.config/opencode/skills/*/SKILL.md` |
+| Workspace | `{worktree}/.opencode/prompts/agents/*.txt` | `{worktree}/.opencode/commands/*.md` | `{worktree}/.opencode/skills/*/SKILL.md` |
 
-| Condition | Action |
-|-----------|--------|
-| No active plan + trivial work | Gate open — proceed directly (no plan needed) |
-| No active plan + lightweight work | Auto-creates plan in approved status |
-| No active plan + complex work | Creates draft plan, **blocks** until approved |
-| Plan in draft | **Blocked** — must transition: draft → approved |
-| Plan blocked | **Blocked** — resolve or create iteration |
-| Plan approved/in_progress | Gate open — proceed within scope |
-| Drift detected | Warning on out-of-scope edits |
+Results cached per session. `clearDiscoveryCache()` resets for tests.
 
-## State Machine
+Currently: 18 agents, 28 commands, 11 skills.
 
-```
-draft ──→ approved ──→ in_progress ──→ done
-                           │
-                           ▼
-                       blocked ──→ draft
+## Model Routing (`openecc.json`)
+
+Auto-generated at `%USERPROFILE%\.config\opencode\openecc.json`. Auto-heals if deleted.
+
+```json
+{ "enabled": true, "default_model": "opencode-go/deepseek-v4-flash", "agents": {} }
 ```
 
-All transitions validated via `VALID_TRANSITIONS`. Terminal states: `done`, `abandoned`.
+- Never touches `config.model` (user's primary model from TUI)
+- `agents` field: per-agent model overrides (e.g., `"planner": "opencode-go/deepseek-v4-pro"`)
+- `enabled: false` disables all routing
+- File regenerated automatically if missing or invalid
 
-## Commands
+## Plan Gate
 
-- `/plan list`, `/plan status`, `/plan create <summary>`, `/plan transition <id> <status>`
+Proportional routing on first user message: trivial → proceed, lightweight → auto-plan, complex → draft + block. State persisted in `.opencode/` (gitignored).
+
+States: `draft → approved → in_progress → done` (terminal: `done`, `abandoned`). Blocked resolves to draft.
+
+Commands: `/plan list`, `/plan status`, `/plan create <summary>`, `/plan transition <id> <status>`
 
 ## Key Constraints
 
-- **Cache clear** to force reinstall: `Remove-Item "$env:USERPROFILE\.cache\opencode\packages\openecc@git+https_*" -Recurse -Force`
-- **bun.lock** is the lockfile; `bun run bundle` is the only build command
-- Plugin is installed via `opencode.json` plugin entry — not run standalone
-- `.opencode/index.json` is the single source of truth for plan state
-- The soul skill (`.opencode/skills/soul/SKILL.md`) is always auto-loaded — do not load it manually
-- Never modify user or workspace `opencode.json`/`opencode.jsonc` except plugin install entry
+- **Cache clear** for reinstall: `Remove-Item "$env:USERPROFILE\.cache\opencode\packages\openecc@git+https_*" -Recurse -Force`
+- `bun.lock` is the lockfile
+- `.opencode/index.json` is single source of truth for plan state
+- Soul skill (`.opencode/skills/soul/SKILL.md`) is auto-loaded — never load manually
+- AGENTS.md changes take effect **next session** (pushed into `config.instructions`)
+- Never modify user/workspace `opencode.json`/`opencode.jsonc` except plugin install entry
 
 ## Install (for users)
 

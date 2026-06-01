@@ -18,17 +18,19 @@ version: 1.0
 
 Every implementation request is gated:
 
-1. **No active plan** → Block. User must create `.opencode/plans/plan-NNN.yaml` and register in `index.json`
-2. **Plan not approved** → Block. Must transition: draft → reviewed → approved
+1. **No active plan** → Auto-creates (trivial = proceed, lightweight = approved, complex = draft)
+2. **Plan in draft** → Block. Must transition: draft → approved
 3. **Plan blocked** → Block. Resolve blocker or create iteration
 4. **Plan done/abandoned** → Block. Clear activePlanId or create new plan
 5. **Plan approved/in_progress** → Gate open. Proceed.
 
 Exceptions: Q&A, review requests, simple lookups pass through.
 
-### 2. Auto-Plan
+### 2. Proportional Gate (3-tier)
 
-Lightweight requests (≤20 tokens, no architecture keywords) auto-create a plan in `approved` status. Complex work blocks with a gate warning.
+- **trivial** (typo, rename, format) → Proceed directly, no plan needed
+- **lightweight** (add feature, fix bug) → Auto-create plan in `approved` status
+- **complex** (refactor, migrate, rewrite) → Create plan in `draft` status, gate blocks until approved
 
 ### 3. Tool Access
 
@@ -36,9 +38,8 @@ Lightweight requests (≤20 tokens, no architecture keywords) auto-create a plan
 MAIN CONTEXT ONLY (TALK + DELEGATE):
   - task        → spawn subagents
   - skill       → load skills
-  - read        → .opencode/ state files only
+  - read        → state files only
   - question    → ask user
-  - todowrite   → track progress
 
 SUBAGENT ONLY (NEVER main context):
   - edit, write → source changes
@@ -46,7 +47,7 @@ SUBAGENT ONLY (NEVER main context):
   - bash        → commands
 
 SHARED:
-  - webfetch    → external docs
+  - webfetch    → read-only external fetch
 ```
 
 ### 4. Drift Detection
@@ -56,8 +57,10 @@ After edits, the system checks if changed files are within the plan's declared s
 ### 5. State Machine
 
 ```
-draft → reviewed → approved → in_progress → done
-                                        → blocked → draft
+draft ──→ approved ──→ in_progress ──→ done
+                           │
+                           ▼
+                       blocked ──→ draft
 ```
 
 All transitions are validated. Invalid transitions are rejected.
