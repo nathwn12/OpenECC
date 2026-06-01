@@ -1,6 +1,6 @@
 {
   "name": "openecc",
-  "version": "2.0.2",
+  "version": "2.1.0",
   "description": "OpenECC — a soul and skills plugin for OpenCode",
   "type": "module",
   "main": ".opencode/plugins/openecc.js",
