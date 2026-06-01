@@ -22,6 +22,11 @@ import {
   stripYamlFrontmatter,
   type ProjectProfile,
 } from "./plugin-support"
+import {
+  memory_recall, memory_status,
+  onSessionCreated, onSessionDeleted, onFileEdited, onToolExecuted,
+  buildMemoryContinuityBlock,
+} from "./memory"
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const agentsMDPath = path.resolve(__dirname, "..", "..", "AGENTS.md")
@@ -43,6 +48,11 @@ export const OpenECCPlugin: Plugin = async ({ client, directory, worktree }) => 
       if (input.toolID === "bash") {
         output.description = `[OPENECC ENFORCEMENT] All commands must run inside a subagent. | ${output.description}`
       }
+    },
+
+    tool: {
+      memory_recall,
+      memory_status,
     },
 
     "command.execute.before": async (input: { command: string; arguments: string }, output: { parts: any[] }) => {
@@ -130,25 +140,39 @@ export const OpenECCPlugin: Plugin = async ({ client, directory, worktree }) => 
       for (const line of buildCompactionContext({ pkg, projectProfile, editedFiles })) {
         output.context.push(line)
       }
+
+      // Inject memory continuity block (persistent across compaction)
+      try {
+        const memBlock = buildMemoryContinuityBlock()
+        if (memBlock) output.context.push(memBlock)
+      } catch {}
     },
 
     "file.edited": async (event: { path: string }) => {
       editedFiles.add(event.path)
+      try { onFileEdited(event.path) } catch {}
     },
 
     "tool.execute.after": async (input: { tool: string; args?: Record<string, unknown> }, _output: unknown) => {
       const filePath = input.args?.filePath as string | undefined
-      if ((input.tool === "edit" || input.tool === "write") && filePath) editedFiles.add(filePath)
+      if ((input.tool === "edit" || input.tool === "write") && filePath) {
+        editedFiles.add(filePath)
+        try { onToolExecuted(input.tool, input.args) } catch {}
+      }
     },
 
-    "session.created": async () => {
+    "session.created": async (event: any) => {
       const pkg = getPackageInfo()
+      const sessionId: string = event?.sessionID ?? event?.id ?? ""
       await client.app.log({ body: { service: "openecc", level: "info" as const, message: `Session started — OpenECC v${pkg.version} active` } })
       try { migrateOpeneccState(worktreePath) } catch {}
+      // Init memory store, log session start, run lightweight maintenance
+      try { onSessionCreated(sessionId) } catch {}
     },
 
     "session.deleted": async () => {
       editedFiles.clear()
+      try { onSessionDeleted() } catch {}
     },
   }
 }

@@ -1,4 +1,4 @@
-export interface ExecutionContext {
+interface ExecutionContext {
   attempt: number
   struggleDetected: boolean
   lastErrorPattern: string | null
