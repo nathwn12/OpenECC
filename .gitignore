@@ -4,4 +4,7 @@ dist/
 .openecc/
 .plan/
 PLAN-extractions.md
-.opencode/
+.opencode/*
+!.opencode/plugins/
+.opencode/plugins/*
+!.opencode/plugins/openecc.js
