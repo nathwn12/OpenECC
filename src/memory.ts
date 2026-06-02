@@ -175,10 +175,15 @@ export class MemoryStore {
         session_id TEXT NOT NULL DEFAULT '',
         kind TEXT NOT NULL DEFAULT 'event',
         content TEXT NOT NULL,
+        content_wy TEXT NOT NULL DEFAULT '',
         source TEXT NOT NULL DEFAULT '',
+        source_ref TEXT NOT NULL DEFAULT '',
         created_at INTEGER NOT NULL
       )
     `)
+
+    try { db.exec("ALTER TABLE openecc_entries ADD COLUMN content_wy TEXT NOT NULL DEFAULT ''") } catch {}
+    try { db.exec("ALTER TABLE openecc_entries ADD COLUMN source_ref TEXT NOT NULL DEFAULT ''") } catch {}
 
     db.exec(`
       CREATE VIRTUAL TABLE IF NOT EXISTS openecc_entries_fts USING fts5(
@@ -321,8 +326,8 @@ export class MemoryStore {
     const db = this.ensure()
     const wyl = wylEncode([{ type: "E", fields: [kind, content.length > 240 ? content.slice(0, 240) + "…" : content, ts()] }])
     db.run(
-      "INSERT INTO openecc_entries (session_id, kind, content, source, created_at) VALUES (?, ?, ?, ?, ?)",
-      [session_id, kind, wyl, source, Date.now()]
+      "INSERT INTO openecc_entries (session_id, kind, content, content_wy, source, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+      [session_id, kind, wyl, wyl, source, Date.now()]
     )
   }
 
@@ -330,8 +335,8 @@ export class MemoryStore {
     const db = this.ensure()
     const wyl = wylEncode([wylDir(worktree, summary)])
     db.run(
-      "INSERT INTO openecc_entries (session_id, kind, content, source, created_at) VALUES (?, ?, ?, ?, ?)",
-      ["", "dir", wyl, worktree, Date.now()]
+      "INSERT INTO openecc_entries (session_id, kind, content, content_wy, source, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+      ["", "dir", wyl, wyl, worktree, Date.now()]
     )
   }
 
