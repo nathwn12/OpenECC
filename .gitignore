@@ -8,3 +8,4 @@ PLAN-extractions.md
 !.opencode/plugins/
 .opencode/plugins/*
 !.opencode/plugins/openecc.js
+.openecc-test/
