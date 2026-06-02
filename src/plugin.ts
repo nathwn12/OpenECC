@@ -1,126 +1,35 @@
 import { type Plugin } from "@opencode-ai/plugin"
 import * as path from "node:path"
-import * as fs from "node:fs"
 import { fileURLToPath } from "node:url"
-import {
-  classifyIntent, classifyTaskScope, getActivePlan, readPlanIndex, writePlanIndex,
-  createPlan, createBuiltinPlan, isValidProjectDir, buildToolAccessBlock,
-  buildPlanGateBlock, migrateOpeneccState, updatePlanStatus,
-  type PlanIndex, type PlanIndexEntry,
-} from "./plan-gate"
-import { getPackageInfo, getOpenEccVersion } from "./identity"
-import { readInstincts, buildInstinctStatusTable } from "./instinct"
-
-import { incrementAttempt, buildExecutionContextBlock } from "./execution"
-import { loadModelRoutingConfig, applyModelRouting } from "./model-routing"
 import { discoverAgents, discoverCommands, discoverSkills } from "./discovery"
+import { buildExecutionContextBlock, createExecutionContext } from "./execution"
+import { getPackageInfo } from "./identity"
+import {
+  applyModelRouting,
+  loadModelRoutingConfig,
+  getConfigPath,
+  writeConfig,
+  populateAgentList,
+} from "./model-routing"
+import { buildPlanGateBlock, getActivePlan, migrateOpeneccState, buildToolAccessBlock } from "./plan-gate"
+import { applyFirstUserPlanGate } from "./plugin-routing"
+import { handleCommandExecuteBefore } from "./plugin-commands"
+import {
+  buildCompactionContext,
+  buildSystemBootstrap,
+  detectProject,
+  readFileSafe,
+  stripYamlFrontmatter,
+  type ProjectProfile,
+} from "./plugin-support"
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const agentsMDPath = path.resolve(__dirname, "..", "..", "AGENTS.md")
 
-function readFileSafe(filePath: string): string {
-  try { return fs.readFileSync(filePath, "utf8") } catch { return "" }
-}
-
-function stripYamlFrontmatter(content: string): string {
-  return content.replace(/^---[\s\S]*?---\n/, "")
-}
-
-
-
-interface ProjectProfile {
-  projectName: string
-  languages: string[]
-  packageManager: string
-}
-
-function detectProject(cwd: string): ProjectProfile {
-  let projectName = path.basename(cwd)
-  try {
-    const pkg = JSON.parse(fs.readFileSync(path.join(cwd, "package.json"), "utf8"))
-    if (pkg.name) projectName = pkg.name
-  } catch {}
-  const languages: string[] = []
-  if (fs.existsSync(path.join(cwd, "tsconfig.json"))) languages.push("typescript")
-  if (fs.existsSync(path.join(cwd, "go.mod"))) languages.push("go")
-  if (fs.existsSync(path.join(cwd, "Cargo.toml"))) languages.push("rust")
-  if (fs.existsSync(path.join(cwd, "pyproject.toml"))) languages.push("python")
-  if (fs.existsSync(path.join(cwd, "package.json"))) languages.push("javascript")
-  const lockfiles: Record<string, string> = { "bun.lock": "bun", "bun.lockb": "bun", "pnpm-lock.yaml": "pnpm", "yarn.lock": "yarn", "package-lock.json": "npm" }
-  let packageManager = "npm"
-  for (const [lock, name] of Object.entries(lockfiles)) { if (fs.existsSync(path.join(cwd, lock))) { packageManager = name; break } }
-  return { projectName, languages, packageManager }
-}
-
-function buildProjectProfileSection(p: ProjectProfile): string {
-  const lines: string[] = ["### Project Profile (auto-detected)"]
-  if (p.languages.length > 0) lines.push(`- Languages: ${p.languages.join(", ")}`)
-  lines.push(`- Package manager: ${p.packageManager}`, "")
-  return lines.join("\n")
-}
-
-// ── Injected Constants ────────────────────────────────────────────────────
-
-const DELEGATOR_ROLE = `## Your Role (OpenECC Delegator)
-Your primary job is to delegate, synthesize, and verify — not to do work directly.
-
-### When to delegate to a subagent (@mention):
-- Planning / architecture → @planner, @architect
-- Code review / quality → @code-reviewer
-- Security review → @security-reviewer
-- Build/type errors → @build-error-resolver
-- Test-first development → @tdd-guide
-- Database design → @database-reviewer
-- E2E testing → @e2e-runner
-- Documentation → @doc-updater, @docs-lookup
-- Codebase/web search → @search-agent
-- Loop operations → @loop-operator
-- Code cleanup → @refactor-cleaner
-- Plan reviews → @plan-ceo-reviewer, @plan-eng-reviewer, @plan-design-reviewer, @plan-devex-reviewer
-- Harness optimization → @harness-optimizer
-
-### When to answer directly:
-- Simple factual questions, quick clarifications, status checks
-- Anything that requires zero tools
-
-### Completion protocol:
-1. **Verify before claiming** — run the command, read the output, then speak
-2. **Synthesize** — distill subagent results into 3-5 sentences max
-3. Place \`---\` followed by **Status:** ✅ Done | 🚧 Blocked | 🔄 In Progress`
-
-const DELEGATION_ENFORCEMENT = `## OpenECC Delegation Enforcement (HARD RULES)
-These are structural constraints, NOT suggestions. Violations are bugs.
-
-### Tool Access Control — Main Context (TALK + DELEGATE only)
-NEVER call these tools in main context:
-
-| Tool | Correct Usage | Delegate To |
-|------|--------------|-------------|
-| \`edit\` | Changes source files | Language-specific subagent |
-| \`write\` | Creates/modifies files | Language-specific subagent |
-| \`bash\` | Runs commands | @executor or language-specific subagent |
-| \`glob\` | Searches codebase | @search-agent |
-| \`grep\` | Searches file contents | @search-agent |
-
-### Self-Audit Before Every Tool Call
-Before calling ANY tool, ask:
-1. "Does this tool edit, write, or run commands?" → DELEGATE via \`task\` tool.
-2. "Does this tool search source code?" → DELEGATE via \`task\` tool.
-3. "Could a subagent do this in parallel while I handle something else?" → DELEGATE via \`task\` tool.
-4. "Am I about to do work directly instead of delegating?" → STOP. Spawn a subagent.
-If any answer is YES, use the \`task\` tool to spawn a subagent. No exceptions.`
-
-const COMPLETION_CONTRACT = `### Before responding
-1. Did you delegate analysis/planning work to a subagent when appropriate?
-2. Did you verify results (not assume)?
-3. Is the response concise and synthesized?
-When done: place \`---\` followed by **Status:** ✅ Done | 🚧 Blocked | 🔄 In Progress`
-
-// ── Plugin Entrypoint ────────────────────────────────────────────────────
-
 export const OpenECCPlugin: Plugin = async ({ client, directory, worktree }) => {
   const worktreePath = worktree || directory
   let projectProfile: ProjectProfile | null = null
+  const executionContext = createExecutionContext()
   const editedFiles = new Set<string>()
 
   return {
@@ -137,73 +46,7 @@ export const OpenECCPlugin: Plugin = async ({ client, directory, worktree }) => 
     },
 
     "command.execute.before": async (input: { command: string; arguments: string }, output: { parts: any[] }) => {
-      if (input.command === "plan") {
-        const planArgs = input.arguments?.trim() || ""
-        const planParts = planArgs.split(/\s+/)
-        const sub = planParts[0]?.toLowerCase()
-        if (!sub) {
-          output.parts = [{ type: "text", text: "Usage: /plan list | /plan status | /plan create <summary> | /plan transition <id> <status>", id: "", sessionID: "", messageID: "" }]
-          return
-        }
-        if (sub === "list") {
-          const idx = readPlanIndex(worktreePath)
-          if (!idx || idx.plans.length === 0) {
-            output.parts = [{ type: "text", text: "No plans found.", id: "", sessionID: "", messageID: "" }]
-            return
-          }
-          const lines = ["## Plans"]
-          for (const p of idx.plans) lines.push(`- ${p.id}: ${p.summary} (${p.status}, ${p.completed}/${p.total})`)
-          output.parts = [{ type: "text", text: lines.join("\n"), id: "", sessionID: "", messageID: "" }]
-          return
-        }
-        if (sub === "status") {
-          const active = getActivePlan(worktreePath)
-          output.parts = [{ type: "text", text: active ? `Active plan ${active.id}: ${active.summary} (${active.status}, ${active.completed}/${active.total})` : "No active plan.", id: "", sessionID: "", messageID: "" }]
-          return
-        }
-        if (sub === "create") {
-          const summary = planParts.slice(1).join(" ")
-          if (!summary) {
-            output.parts = [{ type: "text", text: "Usage: /plan create <summary>", id: "", sessionID: "", messageID: "" }]
-            return
-          }
-          const result = createPlan(worktreePath, { summary, status: "approved" })
-          if (result) {
-            output.parts = [{ type: "text", text: `Plan ${result.id} created and activated: "${summary}"`, id: "", sessionID: "", messageID: "" }]
-          } else {
-            output.parts = [{ type: "text", text: "Failed to create plan.", id: "", sessionID: "", messageID: "" }]
-          }
-          return
-        }
-        if (sub === "transition") {
-          const pid = planParts[1] || ""
-          const newStatus = planParts[2]
-          if (!pid || !newStatus) {
-            output.parts = [{ type: "text", text: "Usage: /plan transition <id> <status>", id: "", sessionID: "", messageID: "" }]
-            return
-          }
-          const VALID_STATUSES: readonly string[] = ["draft", "approved", "in_progress", "done", "blocked", "abandoned"]
-          if (!VALID_STATUSES.includes(newStatus)) {
-            output.parts = [{ type: "text", text: `Invalid status: "${newStatus}". Valid: ${VALID_STATUSES.join(", ")}`, id: "", sessionID: "", messageID: "" }]
-            return
-          }
-          const err = updatePlanStatus(worktreePath, pid, newStatus)
-          output.parts = [{ type: "text", text: err ? `Error: ${err}` : `Plan ${pid} transitioned to ${newStatus}.`, id: "", sessionID: "", messageID: "" }]
-          return
-        }
-        output.parts = [{ type: "text", text: `Unknown: ${sub}. Try: list, status, create, transition`, id: "", sessionID: "", messageID: "" }]
-      }
-      if (input.command === "instinct") {
-        const instArgs = input.arguments?.trim() || ""
-        const instParts = instArgs.split(/\s+/)
-        const sub = instParts[0]?.toLowerCase()
-        if (sub === "status" || !sub) {
-          const instincts = readInstincts(worktreePath)
-          output.parts = [{ type: "text", text: buildInstinctStatusTable(instincts), id: "", sessionID: "", messageID: "" }]
-          return
-        }
-        output.parts = [{ type: "text", text: `Unknown instinct subcommand: "${sub}". Try: status`, id: "", sessionID: "", messageID: "" }]
-      }
+      handleCommandExecuteBefore({ worktreePath, command: input.command, arguments: input.arguments }, output)
     },
 
     config: async (config: any) => {
@@ -225,9 +68,10 @@ export const OpenECCPlugin: Plugin = async ({ client, directory, worktree }) => 
         }
       }
 
-      // Model routing via openecc.json
-      loadModelRoutingConfig()
-      applyModelRouting(config)
+      const routing = loadModelRoutingConfig()
+      const populated = populateAgentList(routing, Object.keys(config.agent))
+      writeConfig(getConfigPath(), populated)
+      applyModelRouting(config, populated)
 
       config.command = config.command || {}
       for (const cmd of discoverCommands(worktreePath)) {
@@ -246,56 +90,26 @@ export const OpenECCPlugin: Plugin = async ({ client, directory, worktree }) => 
       if (!projectProfile) projectProfile = detectProject(worktreePath)
 
       const pkg = getPackageInfo()
-
       const soulPath = path.join(pkg.skillsDir, "soul", "SKILL.md")
-      const soulContent = readFileSafe(soulPath)
-      const cleanSoul = stripYamlFrontmatter(soulContent)
-
-      const identityBlock = `<EXTREMELY_IMPORTANT>
-I am OpenECC, your engineering workflow layer.
-
-I know my version (\`${pkg.version}\`), my install path (\`${pkg.root}\`), and my job: route work to specialists, gate plans until approved, and never claim done without verification. I report to you directly with synthesized results. Everything else is delegated.
-
-You have a soul — the principles below are always active. They are ALREADY LOADED.
-
-${cleanSoul}
-</EXTREMELY_IMPORTANT>`
-
-      const runtimeBlock = `<structured type="runtime">
-type: runtime
-openecc_version: ${pkg.version}
-package_root: ${pkg.root}
-skills_directory: ${pkg.skillsDir}
-</structured>`
+      const cleanSoul = stripYamlFrontmatter(readFileSafe(soulPath))
 
       const systemMessages = output.systemMessages || []
       if (!systemMessages.some((p: any) => p.text?.includes("EXTREMELY_IMPORTANT"))) {
-        const fullBootstrap = [
-          identityBlock,
-          runtimeBlock,
-          buildExecutionContextBlock(),
-          DELEGATOR_ROLE,
-          DELEGATION_ENFORCEMENT,
-          buildToolAccessBlock(),
-          COMPLETION_CONTRACT,
-          buildProjectProfileSection(projectProfile),
-        ].join("\n\n")
-
+        const fullBootstrap = buildSystemBootstrap({
+          pkg,
+          soulContent: cleanSoul,
+          projectProfile,
+          executionBlock: buildExecutionContextBlock(executionContext),
+          toolAccessBlock: buildToolAccessBlock(),
+        })
         systemMessages.unshift({ type: "text", text: fullBootstrap })
         output.systemMessages = systemMessages
       }
 
-      // Inject plan state + gate
       try {
         const activeEntry = getActivePlan(worktreePath)
         if (activeEntry) {
-          const planBlock = `<structured type="plan_state">
-active_plan: ${activeEntry.id}
-status: ${activeEntry.status}
-completed: ${activeEntry.completed}
-total: ${activeEntry.total}
-goal: ${activeEntry.summary}
-</structured>`
+          const planBlock = `<structured type="plan_state">\nactive_plan: ${activeEntry.id}\nstatus: ${activeEntry.status}\ncompleted: ${activeEntry.completed}\ntotal: ${activeEntry.total}\ngoal: ${activeEntry.summary}\n</structured>`
           if (!systemMessages.some((p: any) => p.text?.includes("plan_state"))) {
             systemMessages.push({ type: "text", text: planBlock })
           }
@@ -305,79 +119,16 @@ goal: ${activeEntry.summary}
           }
         }
       } catch {}
-
-
     },
 
     "experimental.chat.messages.transform": async (_input, output: any) => {
-      if (!output.messages?.length) return
-      const firstUser = output.messages.find((m: any) => m.info?.role === "user")
-      if (!firstUser || !firstUser.parts?.length) return
-      if (firstUser.parts.some((p: any) => p.type === "text" && typeof p.text === "string" && (p as any).text.includes("EXTREMELY_IMPORTANT"))) return
-
-      const parts = firstUser.parts as Array<{ type: string; text?: string }>
-      const userText = parts.filter(p => p.type === "text" && typeof p.text === "string").map(p => p.text as string).join(" ")
-      if (!userText || userText.length >= 2000) return
-
-      // ── Execution tracking ────────────────────────────────────
-      incrementAttempt()
-
-      // ── Plan Gate (3-tier proportional routing) ────────────────
-      try {
-        const intent = classifyIntent(userText)
-        if (!intent.isWork || !isValidProjectDir(worktreePath)) return
-
-        const scope = classifyTaskScope(userText)
-        if (scope === "trivial") return
-
-        const existingPlan = getActivePlan(worktreePath)
-        if (existingPlan && existingPlan.status !== "done" && existingPlan.status !== "abandoned" && existingPlan.status !== "blocked") return
-
-        const result = scope === "complex"
-          ? createPlan(worktreePath, { summary: userText, status: "draft" })
-          : createBuiltinPlan(worktreePath, userText, "auto")
-
-        if (result) {
-          const firstText = parts.find(p => p.type === "text")
-          if (firstText && typeof firstText.text === "string") {
-            if (result.plan.status === "draft") {
-              firstText.text = `<PLAN_GATE>
-Plan ${result.id} created in DRAFT for: "${result.summary}"
-Tasks: ${result.plan.tasks.length}
-Gate: BLOCKED — this plan needs approval before any implementation.
-Approve: /plan transition ${result.id} approved
-</PLAN_GATE>
-
-${firstText.text}`
-            } else {
-              firstText.text = `[plan:${result.id}] Auto-approved plan for: "${result.summary}". ${result.plan.tasks.length} tasks. Proceeding.\n\n${firstText.text}`
-            }
-          }
-        }
-      } catch {}
-
-
+      applyFirstUserPlanGate({ worktreePath, messages: output.messages, executionContext })
     },
 
     "experimental.session.compacting": async (_input, output: any) => {
       const pkg = getPackageInfo()
-      output.context.push("# OpenECC Context (preserve across compaction)")
-      output.context.push("", `## OpenECC v${pkg.version}`)
-      output.context.push(`- Package root: ${pkg.root}`)
-      output.context.push("- Primary role: delegate to subagents, synthesize results, verify before claiming")
-      output.context.push("- Soul: Think Before Coding, Simplicity First, Surgical Changes, Goal-Driven Execution")
-      output.context.push("- Route by task type: planning, review, build-fix, TDD, docs, language-specific")
-      output.context.push("- Answer directly when no tools are needed", "")
-      if (projectProfile) {
-        output.context.push("## Project Profile")
-        output.context.push(`- Languages: ${projectProfile.languages.join(", ") || "none detected"}`)
-        output.context.push(`- Package manager: ${projectProfile.packageManager}`, "")
-      }
-
-      if (editedFiles.size > 0) {
-        output.context.push("## Recently Edited Files")
-        for (const f of editedFiles) output.context.push(`- ${f}`)
-        output.context.push("")
+      for (const line of buildCompactionContext({ pkg, projectProfile, editedFiles })) {
+        output.context.push(line)
       }
     },
 
@@ -393,7 +144,6 @@ ${firstText.text}`
     "session.created": async () => {
       const pkg = getPackageInfo()
       await client.app.log({ body: { service: "openecc", level: "info" as const, message: `Session started — OpenECC v${pkg.version} active` } })
-      // One-time migration: .openecc → .opencode (only runs if legacy dir exists)
       try { migrateOpeneccState(worktreePath) } catch {}
     },
 

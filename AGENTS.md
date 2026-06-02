@@ -54,13 +54,13 @@ Currently: 18 agents, 28 commands, 11 skills.
 Auto-generated at `%USERPROFILE%\.config\opencode\openecc.json`. Auto-heals if deleted or contains invalid JSON.
 
 ```json
-{ "enabled": true, "default_model": "opencode-go/deepseek-v4-flash", "agents": {} }
+{ "enabled": false, "global_default": "opencode-go/deepseek-v4-flash", "agents": {} }
 ```
 
 - Never touches `config.model` (user's primary model from TUI)
-- `agents` field: per-agent model overrides (e.g., `"planner": "opencode-go/deepseek-v4-pro"`)
-- Default config routes 15 reasoning-heavy agents (planner, architect, code-reviewer, security-reviewer, etc.) to `opencode-go/deepseek-v4-pro`; all others use the default model
-- `enabled: false` disables all routing
+- `agents` field: per-agent model overrides (e.g., `"planner": "opencode-go/deepseek-v4-pro"`). `""` falls back to `global_default`
+- `global_default` applies to any agent without a per-agent override
+- `enabled: true` activates routing
 - File regenerated automatically if missing or invalid
 
 ## Plan Gate

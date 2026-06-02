@@ -1,49 +1,17 @@
 import * as fs from "node:fs"
 import * as path from "node:path"
 import * as os from "node:os"
-
-export interface ModelRoutingConfig {
-  enabled: boolean
-  default_model: string
-  agents: Record<string, string>
-}
-
-const DEFAULT_MODEL = "opencode-go/deepseek-v4-flash"
-const REASONING_MODEL = "opencode-go/deepseek-v4-pro"
-
-const DEFAULT_REASONING_AGENTS = [
-  "planner",
-  "architect",
-  "code-reviewer",
-  "security-reviewer",
-  "tdd-guide",
-  "build-error-resolver",
-  "database-reviewer",
-  "doc-updater",
-  "e2e-runner",
-  "refactor-cleaner",
-  "plan-ceo-reviewer",
-  "plan-design-reviewer",
-  "plan-eng-reviewer",
-  "plan-devex-reviewer",
-  "harness-optimizer",
-]
+import {
+  type ModelRoutingConfig,
+  DEFAULT_MODEL,
+  generateDefaultConfig,
+  populateAgentList,
+  applyModelRouting as applyModelRoutingPolicy,
+} from "./model-routing-policy"
 
 export function getConfigPath(): string {
   const home = process.env.USERPROFILE || os.homedir()
   return path.join(home, ".config", "opencode", "openecc.json")
-}
-
-export function generateDefaultConfig(): ModelRoutingConfig {
-  const agents: Record<string, string> = {}
-  for (const name of DEFAULT_REASONING_AGENTS) {
-    agents[name] = REASONING_MODEL
-  }
-  return {
-    enabled: true,
-    default_model: DEFAULT_MODEL,
-    agents,
-  }
 }
 
 export function writeConfig(configPath: string, config: ModelRoutingConfig): void {
@@ -59,7 +27,7 @@ export function loadModelRoutingConfig(): ModelRoutingConfig {
       const raw = fs.readFileSync(configPath, "utf8").trim()
       if (raw) {
         const parsed = JSON.parse(raw) as Partial<ModelRoutingConfig>
-        if (parsed.enabled === undefined) parsed.enabled = true
+        if (parsed.enabled === undefined) parsed.enabled = false
         return parsed as ModelRoutingConfig
       }
     }
@@ -73,15 +41,7 @@ export function loadModelRoutingConfig(): ModelRoutingConfig {
 }
 
 export function applyModelRouting(config: any, routing?: ModelRoutingConfig): void {
-  if (!routing) routing = loadModelRoutingConfig()
-  if (!routing.enabled) return
-
-  const defaultModel = routing.default_model || DEFAULT_MODEL
-  const agentModels = routing.agents || {}
-
-  for (const [name, agentConfig] of Object.entries(config.agent || {})) {
-    const agent = agentConfig as Record<string, unknown>
-    if (agent.model) continue
-    agent.model = agentModels[name] || defaultModel
-  }
+  applyModelRoutingPolicy(config, routing || loadModelRoutingConfig())
 }
+
+export { DEFAULT_MODEL, generateDefaultConfig, populateAgentList }

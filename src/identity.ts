@@ -13,7 +13,7 @@ export interface PackageInfo {
   skillsDir: string
 }
 
-function findPackageRoot(fromDir: string): string | null {
+export function findPackageRoot(fromDir: string): string | null {
   let current = fromDir
   for (let i = 0; i < 5; i++) {
     const pj = path.join(current, "package.json")

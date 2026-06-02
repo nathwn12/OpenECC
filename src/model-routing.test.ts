@@ -13,33 +13,14 @@ import {
 } from "./model-routing"
 
 const DEFAULT_MODEL = "opencode-go/deepseek-v4-flash"
-const REASONING_MODEL = "opencode-go/deepseek-v4-pro"
 
-const REASONING_AGENTS = [
+const TEST_AGENTS = [
   "planner",
   "architect",
   "code-reviewer",
-  "security-reviewer",
-  "tdd-guide",
-  "build-error-resolver",
-  "database-reviewer",
-  "doc-updater",
-  "e2e-runner",
-  "refactor-cleaner",
-  "plan-ceo-reviewer",
-  "plan-design-reviewer",
-  "plan-eng-reviewer",
-  "plan-devex-reviewer",
-  "harness-optimizer",
-]
-
-const LIGHT_AGENTS = [
   "search-agent",
   "docs-lookup",
-  "loop-operator",
 ]
-
-const ALL_AGENTS = [...REASONING_AGENTS, ...LIGHT_AGENTS]
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -58,33 +39,19 @@ function setTestDir(): string {
 }
 
 describe("generateDefaultConfig", () => {
-  it("returns enabled: true", () => {
+  it("returns enabled: false", () => {
     const cfg = generateDefaultConfig()
-    expect(cfg.enabled).toBe(true)
+    expect(cfg.enabled).toBe(false)
   })
 
-  it("uses deepseek-v4-flash as default model", () => {
+  it("uses deepseek-v4-flash as global_default", () => {
     const cfg = generateDefaultConfig()
-    expect(cfg.default_model).toBe(DEFAULT_MODEL)
+    expect(cfg.global_default).toBe(DEFAULT_MODEL)
   })
 
-  it("assigns deepseek-v4-pro to all reasoning agents", () => {
+  it("has no agent overrides by default", () => {
     const cfg = generateDefaultConfig()
-    for (const name of REASONING_AGENTS) {
-      expect(cfg.agents[name]).toBe(REASONING_MODEL)
-    }
-  })
-
-  it("does not assign models to light agents", () => {
-    const cfg = generateDefaultConfig()
-    for (const name of LIGHT_AGENTS) {
-      expect(cfg.agents[name]).toBeUndefined()
-    }
-  })
-
-  it("includes all 15 reasoning agents", () => {
-    const cfg = generateDefaultConfig()
-    expect(Object.keys(cfg.agents).length).toBe(REASONING_AGENTS.length)
+    expect(Object.keys(cfg.agents).length).toBe(0)
   })
 })
 
@@ -102,13 +69,13 @@ describe("writeConfig", () => {
   it("writes config to disk correctly", () => {
     const cfg: ModelRoutingConfig = {
       enabled: true,
-      default_model: "test-model",
+      global_default: "test-model",
       agents: { planner: "test-pro" },
     }
     writeConfig(configPath, cfg)
     const loaded = JSON.parse(fs.readFileSync(configPath, "utf8"))
     expect(loaded.enabled).toBe(true)
-    expect(loaded.default_model).toBe("test-model")
+    expect(loaded.global_default).toBe("test-model")
     expect(loaded.agents.planner).toBe("test-pro")
   })
 
@@ -116,52 +83,51 @@ describe("writeConfig", () => {
     const cfg = generateDefaultConfig()
     writeConfig(configPath, cfg)
     const loaded = JSON.parse(fs.readFileSync(configPath, "utf8"))
-    expect(loaded.enabled).toBe(true)
-    expect(Object.keys(loaded.agents).length).toBe(15)
+    expect(loaded.enabled).toBe(false)
+    expect(Object.keys(loaded.agents).length).toBe(0)
   })
 })
 
 describe("applyModelRouting", () => {
-  function defaultRouting(): ModelRoutingConfig {
-    return generateDefaultConfig()
-  }
-
   function makeConfig(): any {
     const agent: Record<string, any> = {}
-    for (const name of ALL_AGENTS) {
+    for (const name of TEST_AGENTS) {
       agent[name] = {}
     }
-    // Simulate a pre-configured user agent (should not be touched)
     agent["build"] = { model: "user-set-model" }
     return { agent }
   }
 
-  it("assigns reasoning_model to reasoning agents", () => {
+  it("assigns global_default to all agents when no per-agent overrides", () => {
     const config = makeConfig()
-    applyModelRouting(config, defaultRouting())
-    for (const name of REASONING_AGENTS) {
-      expect(config.agent[name].model).toBe(REASONING_MODEL)
-    }
-  })
-
-  it("assigns default_model to light agents", () => {
-    const config = makeConfig()
-    applyModelRouting(config, defaultRouting())
-    for (const name of LIGHT_AGENTS) {
+    applyModelRouting(config, {
+      enabled: true,
+      global_default: DEFAULT_MODEL,
+      agents: {},
+    })
+    for (const name of TEST_AGENTS) {
       expect(config.agent[name].model).toBe(DEFAULT_MODEL)
     }
   })
 
   it("does not override user-configured agent models", () => {
     const config = makeConfig()
-    applyModelRouting(config, defaultRouting())
+    applyModelRouting(config, {
+      enabled: true,
+      global_default: DEFAULT_MODEL,
+      agents: {},
+    })
     expect(config.agent.build.model).toBe("user-set-model")
   })
 
   it("skips routing when enabled is false", () => {
     const config = makeConfig()
-    applyModelRouting(config, { enabled: false, default_model: DEFAULT_MODEL, agents: {} })
-    for (const name of ALL_AGENTS) {
+    applyModelRouting(config, {
+      enabled: false,
+      global_default: DEFAULT_MODEL,
+      agents: {},
+    })
+    for (const name of TEST_AGENTS) {
       expect(config.agent[name].model).toBeUndefined()
     }
   })
@@ -170,28 +136,42 @@ describe("applyModelRouting", () => {
     const config = makeConfig()
     applyModelRouting(config, {
       enabled: true,
-      default_model: DEFAULT_MODEL,
+      global_default: DEFAULT_MODEL,
       agents: { planner: "custom-model" },
     })
     expect(config.agent.planner.model).toBe("custom-model")
-    expect(config.agent["code-reviewer"].model).toBe(DEFAULT_MODEL)
+    expect(config.agent["search-agent"].model).toBe(DEFAULT_MODEL)
   })
 
-  it("applies custom default_model", () => {
+  it("empty string override falls back to global_default", () => {
     const config = makeConfig()
     applyModelRouting(config, {
       enabled: true,
-      default_model: "custom-flash",
-      agents: { planner: REASONING_MODEL },
+      global_default: DEFAULT_MODEL,
+      agents: { planner: "" },
     })
-    expect(config.agent.planner.model).toBe(REASONING_MODEL)
+    expect(config.agent.planner.model).toBe(DEFAULT_MODEL)
+  })
+
+  it("applies custom global_default", () => {
+    const config = makeConfig()
+    applyModelRouting(config, {
+      enabled: true,
+      global_default: "custom-flash",
+      agents: { planner: "opencode-go/deepseek-v4-pro" },
+    })
+    expect(config.agent.planner.model).toBe("opencode-go/deepseek-v4-pro")
     expect(config.agent["search-agent"].model).toBe("custom-flash")
   })
 
   it("never sets config.model (primary model untouched)", () => {
     const config = makeConfig()
     config.model = "user-primary-model"
-    applyModelRouting(config, defaultRouting())
+    applyModelRouting(config, {
+      enabled: true,
+      global_default: DEFAULT_MODEL,
+      agents: {},
+    })
     expect(config.model).toBe("user-primary-model")
   })
 })

@@ -5,43 +5,43 @@ export interface ExecutionContext {
   compactionCount: number
 }
 
-let _ctx: ExecutionContext = {
-  attempt: 0,
-  struggleDetected: false,
-  lastErrorPattern: null,
-  compactionCount: 0,
-}
-
-export function getExecutionContext(): ExecutionContext {
-  return { ..._ctx }
-}
-
-export function incrementAttempt(): void {
-  _ctx.attempt++
-}
-
-export function recordError(pattern: string): void {
-  if (_ctx.lastErrorPattern === pattern) {
-    _ctx.struggleDetected = true
+export function createExecutionContext(): ExecutionContext {
+  return {
+    attempt: 0,
+    struggleDetected: false,
+    lastErrorPattern: null,
+    compactionCount: 0,
   }
-  _ctx.lastErrorPattern = pattern
 }
 
-export function clearStruggle(): void {
-  _ctx.struggleDetected = false
-  _ctx.lastErrorPattern = null
+export function incrementAttempt(ctx: ExecutionContext): void {
+  ctx.attempt++
 }
 
-export function resetExecutionContext(): void {
-  _ctx = { attempt: 0, struggleDetected: false, lastErrorPattern: null, compactionCount: 0 }
+export function recordError(ctx: ExecutionContext, pattern: string): void {
+  if (ctx.lastErrorPattern === pattern) {
+    ctx.struggleDetected = true
+  }
+  ctx.lastErrorPattern = pattern
 }
 
-export function incrementCompaction(): void {
-  _ctx.compactionCount++
+export function clearStruggle(ctx: ExecutionContext): void {
+  ctx.struggleDetected = false
+  ctx.lastErrorPattern = null
 }
 
-export function buildExecutionContextBlock(): string {
-  const ctx = getExecutionContext()
+export function resetExecutionContext(ctx: ExecutionContext): void {
+  ctx.attempt = 0
+  ctx.struggleDetected = false
+  ctx.lastErrorPattern = null
+  ctx.compactionCount = 0
+}
+
+export function incrementCompaction(ctx: ExecutionContext): void {
+  ctx.compactionCount++
+}
+
+export function buildExecutionContextBlock(ctx: ExecutionContext): string {
   const yaml = [
     "type: execution",
     `attempt: ${ctx.attempt}`,

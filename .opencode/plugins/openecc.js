@@ -1,13 +1,13 @@
 // @bun
 // src/plugin.ts
-import * as path6 from "path";
-import * as fs6 from "fs";
+import * as path9 from "path";
 import { fileURLToPath as fileURLToPath3 } from "url";
 
-// src/plan-gate.ts
+// src/discovery.ts
+import * as path2 from "path";
 import * as fs2 from "fs";
 import * as os from "os";
-import * as path2 from "path";
+import { fileURLToPath as fileURLToPath2 } from "url";
 
 // src/identity.ts
 import * as fs from "fs";
@@ -54,7 +54,281 @@ function getPackageInfo() {
   return _pkgInfo;
 }
 
+// src/discovery-policy.ts
+function stripYamlFrontmatter(content) {
+  return content.replace(/^---[\s\S]*?---\n/, "");
+}
+function parseCommandFrontmatter(content) {
+  const match = content.match(/^---\n([\s\S]*?)\n---/);
+  if (!match)
+    return {};
+  const result = {};
+  for (const line of match[1].split(`
+`)) {
+    const kv = line.match(/^(\w+):\s*(.+)$/);
+    if (kv) {
+      let value = kv[2].trim();
+      if (value === "true")
+        value = true;
+      else if (value === "false")
+        value = false;
+      else if (value.startsWith('"') && value.endsWith('"'))
+        value = value.slice(1, -1);
+      result[kv[1]] = value;
+    }
+  }
+  return result;
+}
+function inferAgentDesc(name, prompt) {
+  const firstLine = prompt.split(`
+`)[0]?.trim() || "";
+  if (firstLine) {
+    return firstLine.replace(/^You are an?\s+/i, "").replace(/\.$/, "");
+  }
+  return name.replace(/-/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+}
+function inferAgentPermission(name) {
+  if (name === "search-agent" || name === "docs-lookup") {
+    return { edit: "deny", write: "deny", bash: "deny", task: "deny" };
+  }
+  if (name === "code-reviewer" || name === "planner" || name === "architect" || name.startsWith("plan-") && name.endsWith("-reviewer")) {
+    return { edit: "deny", write: "deny", task: "deny" };
+  }
+  return;
+}
+function mergeByName(priorityGroups) {
+  const seen = new Map;
+  for (const group of priorityGroups) {
+    for (const item of group) {
+      if (!seen.has(item.name)) {
+        seen.set(item.name, item);
+      }
+    }
+  }
+  return [...seen.values()];
+}
+
+// src/discovery.ts
+var __dirname3 = path2.dirname(fileURLToPath2(import.meta.url));
+var pluginRoot = findPackageRoot(__dirname3) ?? path2.resolve(__dirname3, "..", "..");
+var BUNDLED_AGENTS_DIR = path2.join(pluginRoot, ".opencode", "prompts", "agents");
+var BUNDLED_COMMANDS_DIR = path2.join(pluginRoot, ".opencode", "commands");
+var BUNDLED_SKILLS_DIR = path2.join(pluginRoot, ".opencode", "skills");
+function readFileSafe(filePath) {
+  try {
+    return fs2.readFileSync(filePath, "utf8");
+  } catch {
+    return "";
+  }
+}
+function homeDir() {
+  return process.env.USERPROFILE || os.homedir();
+}
+function scanAgentDir(dir, source) {
+  const results = [];
+  try {
+    const entries = fs2.readdirSync(dir, { withFileTypes: true });
+    for (const entry of entries) {
+      if (!entry.isFile() || !entry.name.endsWith(".txt"))
+        continue;
+      const name = entry.name.slice(0, -4);
+      const prompt = readFileSafe(path2.join(dir, entry.name));
+      if (!prompt)
+        continue;
+      results.push({ name, desc: inferAgentDesc(name, prompt), prompt, permission: inferAgentPermission(name), source });
+    }
+  } catch {}
+  return results;
+}
+function scanCommandDir(dir, source) {
+  const results = [];
+  try {
+    const entries = fs2.readdirSync(dir, { withFileTypes: true });
+    for (const entry of entries) {
+      if (!entry.isFile() || !entry.name.endsWith(".md"))
+        continue;
+      const name = entry.name.slice(0, -3);
+      const content = readFileSafe(path2.join(dir, entry.name));
+      if (!content)
+        continue;
+      const fm = parseCommandFrontmatter(content);
+      const template = stripYamlFrontmatter(content);
+      if (!template)
+        continue;
+      results.push({
+        name,
+        desc: fm.description || name.replace(/-/g, " "),
+        template,
+        agent: fm.agent,
+        subtask: fm.subtask,
+        source
+      });
+    }
+  } catch {}
+  return results;
+}
+function scanSkillDir(dir) {
+  const results = [];
+  try {
+    const entries = fs2.readdirSync(dir, { withFileTypes: true });
+    for (const entry of entries) {
+      if (!entry.isDirectory())
+        continue;
+      if (fs2.existsSync(path2.join(dir, entry.name, "SKILL.md"))) {
+        results.push(path2.join(dir, entry.name));
+      }
+    }
+  } catch {}
+  return results;
+}
+function globalDir(sub) {
+  return path2.join(homeDir(), ".config", "opencode", sub);
+}
+function workspaceDir(worktree, sub) {
+  return path2.join(worktree, ".opencode", sub);
+}
+var cachedAgents = null;
+var cachedCommands = null;
+var cachedSkills = null;
+function discoverAgents(worktreePath) {
+  if (cachedAgents)
+    return cachedAgents;
+  cachedAgents = mergeByName([
+    scanAgentDir(BUNDLED_AGENTS_DIR, "openecc"),
+    scanAgentDir(globalDir(path2.join("prompts", "agents")), "global"),
+    scanAgentDir(workspaceDir(worktreePath, path2.join("prompts", "agents")), "workspace")
+  ]);
+  return cachedAgents;
+}
+function discoverCommands(worktreePath) {
+  if (cachedCommands)
+    return cachedCommands;
+  cachedCommands = mergeByName([
+    scanCommandDir(BUNDLED_COMMANDS_DIR, "openecc"),
+    scanCommandDir(globalDir("commands"), "global"),
+    scanCommandDir(workspaceDir(worktreePath, "commands"), "workspace")
+  ]);
+  return cachedCommands;
+}
+function discoverSkills(worktreePath) {
+  if (cachedSkills)
+    return cachedSkills;
+  const bundled = scanSkillDir(BUNDLED_SKILLS_DIR);
+  const global = scanSkillDir(globalDir("skills"));
+  const workspace = scanSkillDir(workspaceDir(worktreePath, "skills"));
+  const seen = new Set;
+  const results = [];
+  for (const dir of [...bundled, ...global, ...workspace]) {
+    if (!seen.has(dir)) {
+      seen.add(dir);
+      results.push(dir);
+    }
+  }
+  cachedSkills = results;
+  return cachedSkills;
+}
+
+// src/execution.ts
+function createExecutionContext() {
+  return {
+    attempt: 0,
+    struggleDetected: false,
+    lastErrorPattern: null,
+    compactionCount: 0
+  };
+}
+function incrementAttempt(ctx) {
+  ctx.attempt++;
+}
+function buildExecutionContextBlock(ctx) {
+  const yaml = [
+    "type: execution",
+    `attempt: ${ctx.attempt}`,
+    `struggle_detected: ${ctx.struggleDetected}`,
+    `compaction_count: ${ctx.compactionCount}`
+  ].join(`
+`);
+  return `<structured type="execution">
+${yaml}
+</structured>`;
+}
+
+// src/model-routing.ts
+import * as fs3 from "fs";
+import * as path3 from "path";
+import * as os2 from "os";
+
+// src/model-routing-policy.ts
+var DEFAULT_MODEL = "opencode-go/deepseek-v4-flash";
+function generateDefaultConfig() {
+  return {
+    enabled: false,
+    global_default: DEFAULT_MODEL,
+    agents: {}
+  };
+}
+function populateAgentList(routing, agentNames) {
+  const agents = { ...routing.agents };
+  for (const name of agentNames) {
+    if (!(name in agents))
+      agents[name] = "";
+  }
+  return { ...routing, agents };
+}
+function applyModelRouting(config, routing) {
+  if (!routing)
+    routing = generateDefaultConfig();
+  if (!routing.enabled)
+    return;
+  const globalDefault = routing.global_default || DEFAULT_MODEL;
+  const agentModels = routing.agents || {};
+  for (const [name, agentConfig] of Object.entries(config.agent || {})) {
+    const agent = agentConfig;
+    if (agent.model)
+      continue;
+    agent.model = agentModels[name] || globalDefault;
+  }
+}
+
+// src/model-routing.ts
+function getConfigPath() {
+  const home = process.env.USERPROFILE || os2.homedir();
+  return path3.join(home, ".config", "opencode", "openecc.json");
+}
+function writeConfig(configPath, config) {
+  const dir = path3.dirname(configPath);
+  if (!fs3.existsSync(dir))
+    fs3.mkdirSync(dir, { recursive: true });
+  fs3.writeFileSync(configPath, JSON.stringify(config, null, 2), "utf8");
+}
+function loadModelRoutingConfig() {
+  const configPath = getConfigPath();
+  try {
+    if (fs3.existsSync(configPath)) {
+      const raw = fs3.readFileSync(configPath, "utf8").trim();
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (parsed.enabled === undefined)
+          parsed.enabled = false;
+        return parsed;
+      }
+    }
+  } catch {}
+  const defaults = generateDefaultConfig();
+  writeConfig(configPath, defaults);
+  return defaults;
+}
+function applyModelRouting2(config, routing) {
+  applyModelRouting(config, routing || loadModelRoutingConfig());
+}
+
 // src/plan-gate.ts
+import * as path6 from "path";
+
+// src/plan-policy.ts
+import * as fs4 from "fs";
+import * as os3 from "os";
+import * as path4 from "path";
 var VALID_TRANSITIONS = {
   draft: ["approved", "abandoned"],
   approved: ["in_progress", "abandoned"],
@@ -68,138 +342,6 @@ function validatePlanTransition(current, next) {
   if (!allowed)
     return false;
   return allowed.includes(next);
-}
-function stateDir(worktreePath) {
-  return path2.join(worktreePath, ".opencode");
-}
-function indexJsonPath(worktreePath) {
-  return path2.join(stateDir(worktreePath), "index.json");
-}
-function planYamlPath(worktreePath, planId) {
-  return path2.join(plansDirPath(worktreePath), `${planId}.yaml`);
-}
-function plansDirPath(worktreePath) {
-  return path2.join(stateDir(worktreePath), "plans");
-}
-function readPlanFile(worktreePath, planId) {
-  try {
-    const f = planYamlPath(worktreePath, planId);
-    if (!fs2.existsSync(f))
-      return null;
-    const raw = fs2.readFileSync(f, "utf8");
-    return parsePlanYaml(raw);
-  } catch {
-    return null;
-  }
-}
-function writePlanFile(worktreePath, plan) {
-  const yaml = serializePlanYaml(plan);
-  const f = planYamlPath(worktreePath, plan.id);
-  const dir = path2.dirname(f);
-  if (!fs2.existsSync(dir))
-    fs2.mkdirSync(dir, { recursive: true });
-  const tmp = f + ".tmp";
-  fs2.writeFileSync(tmp, yaml, "utf8");
-  fs2.renameSync(tmp, f);
-}
-function readPlanIndex(worktreePath) {
-  try {
-    const f = indexJsonPath(worktreePath);
-    if (!fs2.existsSync(f))
-      return null;
-    const raw = JSON.parse(fs2.readFileSync(f, "utf8"));
-    if (raw.schemaVersion === 3)
-      return raw;
-    if (raw.schemaVersion === 1) {
-      raw.schemaVersion = 3;
-      writePlanIndex(worktreePath, raw);
-      return raw;
-    }
-    return migrateOpeneccState(worktreePath);
-  } catch {
-    return null;
-  }
-}
-function writePlanIndex(worktreePath, index) {
-  const f = indexJsonPath(worktreePath);
-  const dir = path2.dirname(f);
-  if (!fs2.existsSync(dir))
-    fs2.mkdirSync(dir, { recursive: true });
-  const tmp = f + ".tmp";
-  fs2.writeFileSync(tmp, JSON.stringify(index, null, 2), "utf8");
-  fs2.renameSync(tmp, f);
-}
-function migrateOpeneccState(worktreePath) {
-  const legacy = path2.join(worktreePath, ".openecc");
-  if (!fs2.existsSync(legacy))
-    return null;
-  const out = stateDir(worktreePath);
-  const old = fs2.readdirSync(legacy).filter((f) => /^plan-\d+\.yaml$/.test(f));
-  const plansDir = plansDirPath(worktreePath);
-  if (!fs2.existsSync(plansDir))
-    fs2.mkdirSync(plansDir, { recursive: true });
-  for (const f of old) {
-    try {
-      fs2.cpSync(path2.join(legacy, f), path2.join(plansDir, f), { force: true });
-    } catch {}
-  }
-  const oldIndex = path2.join(legacy, "index.json");
-  if (fs2.existsSync(oldIndex)) {
-    try {
-      const raw = JSON.parse(fs2.readFileSync(oldIndex, "utf8"));
-      const migrated = {
-        openeccVersion: getOpenEccVersion(),
-        schemaVersion: 3,
-        projectDir: worktreePath,
-        projectName: path2.basename(worktreePath),
-        updatedAt: new Date().toISOString(),
-        activePlanId: raw.activePlanId ?? null,
-        plans: (raw.plans || []).map((p) => ({
-          id: String(p.id || ""),
-          status: p.status || "draft",
-          createdAt: String(p.createdAt || new Date().toISOString()),
-          updatedAt: String(p.updatedAt || new Date().toISOString()),
-          parent: p.parent ? String(p.parent) : undefined,
-          summary: String(p.summary || ""),
-          total: Number(p.total || 0),
-          completed: Number(p.completed || 0),
-          blocked: Number(p.blocked || 0),
-          file: p.file ? String(p.file) : "",
-          plannerMode: p.plannerMode,
-          plannerSource: p.plannerSource
-        }))
-      };
-      writePlanIndex(worktreePath, migrated);
-      return migrated;
-    } catch {}
-  }
-  const fresh = {
-    openeccVersion: getOpenEccVersion(),
-    schemaVersion: 3,
-    projectDir: worktreePath,
-    projectName: path2.basename(worktreePath),
-    updatedAt: new Date().toISOString(),
-    activePlanId: null,
-    plans: []
-  };
-  writePlanIndex(worktreePath, fresh);
-  return fresh;
-}
-function getActivePlan(worktreePath) {
-  const idx = readPlanIndex(worktreePath);
-  if (!idx || idx.activePlanId === null)
-    return null;
-  return idx.plans.find((p) => p.id === idx.activePlanId) ?? null;
-}
-function now() {
-  return new Date().toISOString();
-}
-function nextPlanId(idx) {
-  const maxN = idx.plans.reduce((m, p) => {
-    const n = parseInt(p.id.replace("plan-", ""), 10);
-    return isNaN(n) ? m : Math.max(m, n);
-  }, 0);
-  return `plan-${String(maxN + 1).padStart(3, "0")}`;
 }
 var COMPLEX_PATTERNS = [
   "refactor",
@@ -220,6 +362,13 @@ var TRIVIAL_PATTERNS = [
   "comment",
   "spelling"
 ];
+function classifyTaskScope(text) {
+  if (isComplexTask(text))
+    return "complex";
+  if (isTrivialTask(text))
+    return "trivial";
+  return "lightweight";
+}
 function isComplexTask(text) {
   const tokens = text.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
   return tokens.some((t) => COMPLEX_PATTERNS.includes(t));
@@ -229,173 +378,6 @@ function isTrivialTask(text) {
   if (text.length < 20)
     return true;
   return tokens.some((t) => TRIVIAL_PATTERNS.includes(t));
-}
-function classifyTaskScope(text) {
-  if (isComplexTask(text))
-    return "complex";
-  if (isTrivialTask(text))
-    return "trivial";
-  return "lightweight";
-}
-function buildPlanStub(worktreePath) {
-  const idx = readPlanIndex(worktreePath) || {
-    openeccVersion: getOpenEccVersion(),
-    schemaVersion: 3,
-    projectDir: worktreePath,
-    projectName: path2.basename(worktreePath),
-    updatedAt: now(),
-    activePlanId: null,
-    plans: []
-  };
-  return { idx };
-}
-function createPlan(worktreePath, input) {
-  try {
-    const { idx } = buildPlanStub(worktreePath);
-    const pid = nextPlanId(idx);
-    const ts = now();
-    const status = input.status || "approved";
-    const tasks = (input.tasks || []).map((t, i) => ({
-      id: `task-${String(i + 1).padStart(3, "0")}`,
-      summary: t.summary,
-      status: t.status || "pending",
-      files: t.files || [],
-      depends_on: t.depends_on || [],
-      effort: t.effort,
-      verification: t.verification
-    }));
-    const summary = input.summary.length > 80 ? input.summary.slice(0, 77) + "..." : input.summary;
-    const planData = {
-      schema: "openecc/plan-v1",
-      id: pid,
-      version: 1,
-      createdAt: ts,
-      updatedAt: ts,
-      status,
-      parent: input.parent || null,
-      goal: input.goal || summary,
-      check: input.check || "TBD",
-      summary,
-      tasks,
-      plan_notes: input.plan_notes || [],
-      plannerMode: input.plannerMode,
-      plannerSource: input.plannerSource
-    };
-    writePlanFile(worktreePath, planData);
-    const total = tasks.length;
-    const entry = {
-      id: pid,
-      status,
-      createdAt: ts,
-      updatedAt: ts,
-      parent: input.parent,
-      summary,
-      total,
-      completed: 0,
-      blocked: 0,
-      file: `plans/${pid}.yaml`,
-      plannerMode: input.plannerMode,
-      plannerSource: input.plannerSource
-    };
-    idx.plans.push(entry);
-    idx.activePlanId = pid;
-    idx.updatedAt = ts;
-    writePlanIndex(worktreePath, idx);
-    return { id: pid, summary, plan: planData };
-  } catch {
-    return null;
-  }
-}
-function createBuiltinPlan(worktreePath, goal, source = "auto") {
-  const summary = goal.length > 80 ? goal.slice(0, 77) + "..." : goal;
-  const truncatedGoal = goal.length > 200 ? goal.slice(0, 197) + "..." : goal;
-  return createPlan(worktreePath, {
-    summary,
-    goal: truncatedGoal,
-    status: "approved",
-    tasks: [
-      {
-        summary: `Confirm the smallest scope for: ${goal.length > 60 ? goal.slice(0, 57) + "..." : goal}`,
-        status: "pending",
-        depends_on: [],
-        effort: "2min"
-      },
-      {
-        summary: "Implement the change in the primary file or module",
-        status: "pending",
-        depends_on: ["task-001"],
-        effort: "5min"
-      },
-      {
-        summary: "Verify the result with a focused test or manual check",
-        status: "pending",
-        depends_on: ["task-002"],
-        effort: "3min",
-        verification: "bun test or relevant verification"
-      }
-    ],
-    plannerMode: "builtin",
-    plannerSource: source
-  });
-}
-function updatePlanStatus(worktreePath, id, newStatus, updates) {
-  const idx = readPlanIndex(worktreePath);
-  if (!idx)
-    return "No plan index found";
-  const entry = idx.plans.find((p) => p.id === id);
-  if (!entry)
-    return `Plan ${id} not found`;
-  if (!validatePlanTransition(entry.status, newStatus)) {
-    return `Invalid transition: ${entry.status} \u2192 ${newStatus}. Valid: ${(VALID_TRANSITIONS[entry.status] || []).join(", ") || "none (terminal state)"}`;
-  }
-  entry.status = newStatus;
-  entry.updatedAt = now();
-  if (updates?.done !== undefined)
-    entry.completed = updates.done;
-  if (updates?.total !== undefined)
-    entry.total = updates.total;
-  if (newStatus === "done" || newStatus === "abandoned") {
-    if (idx.activePlanId === id)
-      idx.activePlanId = null;
-  }
-  if (newStatus === "approved" || newStatus === "in_progress") {
-    idx.activePlanId = id;
-  }
-  idx.updatedAt = now();
-  writePlanIndex(worktreePath, idx);
-  const plan = readPlanFile(worktreePath, id);
-  if (plan) {
-    plan.status = newStatus;
-    plan.updatedAt = now();
-    writePlanFile(worktreePath, plan);
-  }
-  return null;
-}
-var PROJECT_MARKERS = [".git", "package.json", "go.mod", "Cargo.toml", "pyproject.toml", "composer.json", "Gemfile", "project.json", "pubspec.yaml", "mix.exs"];
-var INIT_MARKERS = [".opencode"];
-function isValidProjectDir(dir) {
-  try {
-    const stat = fs2.statSync(dir);
-    if (!stat.isDirectory())
-      return false;
-    const resolved = path2.resolve(dir);
-    if (PROJECT_MARKERS.some((m) => fs2.existsSync(path2.join(resolved, m))))
-      return true;
-    if (INIT_MARKERS.some((m) => fs2.existsSync(path2.join(resolved, m))))
-      return true;
-    const home = os.homedir();
-    if (path2.parse(resolved).root !== path2.parse(home).root)
-      return true;
-    const relative2 = path2.relative(home, resolved);
-    if (relative2 && !relative2.startsWith("..") && !path2.isAbsolute(relative2)) {
-      const segments = relative2.split(path2.sep).filter(Boolean);
-      if (segments.length >= 2)
-        return true;
-    }
-    return false;
-  } catch {
-    return false;
-  }
 }
 var IMPLEMENT_WORDS = new Set([
   "implement",
@@ -484,6 +466,38 @@ completed: ${activePlan.completed}/${activePlan.total}
 gate: ${gate}
 </structured>`;
 }
+function isValidProjectDir(dir) {
+  try {
+    const stat = fs4.statSync(dir);
+    if (!stat.isDirectory())
+      return false;
+    const resolved = path4.resolve(dir);
+    const PROJECT_MARKERS = [".git", "package.json", "go.mod", "Cargo.toml", "pyproject.toml", "composer.json", "Gemfile", "project.json", "pubspec.yaml", "mix.exs"];
+    const INIT_MARKERS = [".opencode"];
+    if (PROJECT_MARKERS.some((m) => fs4.existsSync(path4.join(resolved, m))))
+      return true;
+    if (INIT_MARKERS.some((m) => fs4.existsSync(path4.join(resolved, m))))
+      return true;
+    const home = os3.homedir();
+    if (path4.parse(resolved).root !== path4.parse(home).root)
+      return true;
+    const relative2 = path4.relative(home, resolved);
+    if (relative2 && !relative2.startsWith("..") && !path4.isAbsolute(relative2)) {
+      const segments = relative2.split(path4.sep).filter(Boolean);
+      if (segments.length >= 2)
+        return true;
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+// src/plan-store.ts
+import * as fs5 from "fs";
+import * as path5 from "path";
+
+// src/plan-yaml.ts
 function yamlStr(s) {
   if (/[:{}[\]&*!|>'"%@`]/.test(s) || s.includes(`
 `) || s.includes("#")) {
@@ -657,15 +671,6 @@ function parsePlanYaml(raw) {
       tasks.push(currentTask);
     plan.tasks = tasks;
     const notes = [];
-    for (const line of lines) {
-      const m = line.match(/^\s*-\s+(.*)$/);
-      if (m && line.trim() !== "- id:" && !line.trim().startsWith("- ") && !line.trim().startsWith("- id:")) {
-        const prevLine = lines[Math.max(0, lines.indexOf(line) - 1)];
-        if (prevLine.trim() === "plan_notes:" || lines.indexOf(line) > 0 && lines.filter((l, idx) => idx < lines.indexOf(line) && l.trim() === "plan_notes:").length > 0) {
-          notes.push(unquote(m[1]));
-        }
-      }
-    }
     const notesSection = raw.split(`
 plan_notes:
 `)[1];
@@ -684,9 +689,341 @@ plan_notes:
   }
 }
 
+// src/plan-store.ts
+function stateDir(worktreePath) {
+  return path5.join(worktreePath, ".opencode");
+}
+function indexJsonPath(worktreePath) {
+  return path5.join(stateDir(worktreePath), "index.json");
+}
+function plansDirPath(worktreePath) {
+  return path5.join(stateDir(worktreePath), "plans");
+}
+function planYamlPath(worktreePath, planId) {
+  return path5.join(plansDirPath(worktreePath), `${planId}.yaml`);
+}
+function now() {
+  return new Date().toISOString();
+}
+function nextPlanId(idx) {
+  const maxN = idx.plans.reduce((m, p) => {
+    const n = parseInt(p.id.replace("plan-", ""), 10);
+    return isNaN(n) ? m : Math.max(m, n);
+  }, 0);
+  return `plan-${String(maxN + 1).padStart(3, "0")}`;
+}
+function readPlanFile(worktreePath, planId) {
+  try {
+    const f = planYamlPath(worktreePath, planId);
+    if (!fs5.existsSync(f))
+      return null;
+    const raw = fs5.readFileSync(f, "utf8");
+    return parsePlanYaml(raw);
+  } catch {
+    return null;
+  }
+}
+function writePlanFile(worktreePath, plan) {
+  const yaml = serializePlanYaml(plan);
+  const f = planYamlPath(worktreePath, plan.id);
+  const dir = path5.dirname(f);
+  if (!fs5.existsSync(dir))
+    fs5.mkdirSync(dir, { recursive: true });
+  const tmp = f + ".tmp";
+  fs5.writeFileSync(tmp, yaml, "utf8");
+  fs5.renameSync(tmp, f);
+}
+function readPlanIndex(worktreePath) {
+  try {
+    const f = indexJsonPath(worktreePath);
+    if (!fs5.existsSync(f))
+      return null;
+    const raw = JSON.parse(fs5.readFileSync(f, "utf8"));
+    if (raw.schemaVersion === 3)
+      return raw;
+    if (raw.schemaVersion === 1) {
+      raw.schemaVersion = 3;
+      writePlanIndex(worktreePath, raw);
+      return raw;
+    }
+    return migrateOpeneccState(worktreePath);
+  } catch {
+    return null;
+  }
+}
+function writePlanIndex(worktreePath, index) {
+  const f = indexJsonPath(worktreePath);
+  const dir = path5.dirname(f);
+  if (!fs5.existsSync(dir))
+    fs5.mkdirSync(dir, { recursive: true });
+  const tmp = f + ".tmp";
+  fs5.writeFileSync(tmp, JSON.stringify(index, null, 2), "utf8");
+  fs5.renameSync(tmp, f);
+}
+function migrateOpeneccState(worktreePath) {
+  const legacy = path5.join(worktreePath, ".openecc");
+  if (!fs5.existsSync(legacy))
+    return null;
+  const old = fs5.readdirSync(legacy).filter((f) => /^plan-\d+\.yaml$/.test(f));
+  const plansDir = plansDirPath(worktreePath);
+  if (!fs5.existsSync(plansDir))
+    fs5.mkdirSync(plansDir, { recursive: true });
+  for (const f of old) {
+    try {
+      fs5.cpSync(path5.join(legacy, f), path5.join(plansDir, f), { force: true });
+    } catch {}
+  }
+  const oldIndex = path5.join(legacy, "index.json");
+  if (fs5.existsSync(oldIndex)) {
+    try {
+      const raw = JSON.parse(fs5.readFileSync(oldIndex, "utf8"));
+      const migrated = {
+        openeccVersion: getOpenEccVersion(),
+        schemaVersion: 3,
+        projectDir: worktreePath,
+        projectName: path5.basename(worktreePath),
+        updatedAt: new Date().toISOString(),
+        activePlanId: raw.activePlanId ?? null,
+        plans: (raw.plans || []).map((p) => ({
+          id: String(p.id || ""),
+          status: p.status || "draft",
+          createdAt: String(p.createdAt || new Date().toISOString()),
+          updatedAt: String(p.updatedAt || new Date().toISOString()),
+          parent: p.parent ? String(p.parent) : undefined,
+          summary: String(p.summary || ""),
+          total: Number(p.total || 0),
+          completed: Number(p.completed || 0),
+          blocked: Number(p.blocked || 0),
+          file: p.file ? String(p.file) : "",
+          plannerMode: p.plannerMode,
+          plannerSource: p.plannerSource
+        }))
+      };
+      writePlanIndex(worktreePath, migrated);
+      return migrated;
+    } catch {}
+  }
+  const fresh = {
+    openeccVersion: getOpenEccVersion(),
+    schemaVersion: 3,
+    projectDir: worktreePath,
+    projectName: path5.basename(worktreePath),
+    updatedAt: new Date().toISOString(),
+    activePlanId: null,
+    plans: []
+  };
+  writePlanIndex(worktreePath, fresh);
+  return fresh;
+}
+function getActivePlan(worktreePath) {
+  const idx = readPlanIndex(worktreePath);
+  if (!idx || idx.activePlanId === null)
+    return null;
+  return idx.plans.find((p) => p.id === idx.activePlanId) ?? null;
+}
+function createPlanEntry(plan) {
+  return {
+    id: plan.id,
+    status: plan.status,
+    createdAt: plan.createdAt,
+    updatedAt: plan.updatedAt,
+    parent: plan.parent || undefined,
+    summary: plan.summary,
+    total: plan.tasks.length,
+    completed: 0,
+    blocked: 0,
+    file: `plans/${plan.id}.yaml`,
+    plannerMode: plan.plannerMode,
+    plannerSource: plan.plannerSource
+  };
+}
+function allocatePlanId(worktreePath) {
+  const idx = readPlanIndex(worktreePath) || {
+    openeccVersion: getOpenEccVersion(),
+    schemaVersion: 3,
+    projectDir: worktreePath,
+    projectName: path5.basename(worktreePath),
+    updatedAt: now(),
+    activePlanId: null,
+    plans: []
+  };
+  return nextPlanId(idx);
+}
+
+// src/plan-gate.ts
+function now2() {
+  return new Date().toISOString();
+}
+function freshIndex(worktreePath) {
+  return {
+    openeccVersion: getOpenEccVersion(),
+    schemaVersion: 3,
+    projectDir: worktreePath,
+    projectName: path6.basename(worktreePath),
+    updatedAt: now2(),
+    activePlanId: null,
+    plans: []
+  };
+}
+function createPlan(worktreePath, input) {
+  try {
+    const idx = readPlanIndex(worktreePath) || freshIndex(worktreePath);
+    const pid = allocatePlanId(worktreePath);
+    const ts = now2();
+    const status = input.status || "approved";
+    const tasks = (input.tasks || []).map((t, i) => ({
+      id: `task-${String(i + 1).padStart(3, "0")}`,
+      summary: t.summary,
+      status: t.status || "pending",
+      files: t.files || [],
+      depends_on: t.depends_on || [],
+      effort: t.effort,
+      verification: t.verification
+    }));
+    const summary = input.summary.length > 80 ? input.summary.slice(0, 77) + "..." : input.summary;
+    const planData = {
+      schema: "openecc/plan-v1",
+      id: pid,
+      version: 1,
+      createdAt: ts,
+      updatedAt: ts,
+      status,
+      parent: input.parent || null,
+      goal: input.goal || summary,
+      check: input.check || "TBD",
+      summary,
+      tasks,
+      plan_notes: input.plan_notes || [],
+      plannerMode: input.plannerMode,
+      plannerSource: input.plannerSource
+    };
+    writePlanFile(worktreePath, planData);
+    const entry = createPlanEntry(planData);
+    idx.plans.push(entry);
+    idx.activePlanId = pid;
+    idx.updatedAt = ts;
+    writePlanIndex(worktreePath, idx);
+    return { id: pid, summary, plan: planData };
+  } catch {
+    return null;
+  }
+}
+function createBuiltinPlan(worktreePath, goal, source = "auto") {
+  const summary = goal.length > 80 ? goal.slice(0, 77) + "..." : goal;
+  const truncatedGoal = goal.length > 200 ? goal.slice(0, 197) + "..." : goal;
+  return createPlan(worktreePath, {
+    summary,
+    goal: truncatedGoal,
+    status: "approved",
+    tasks: [
+      {
+        summary: `Confirm the smallest scope for: ${goal.length > 60 ? goal.slice(0, 57) + "..." : goal}`,
+        status: "pending",
+        depends_on: [],
+        effort: "2min"
+      },
+      {
+        summary: "Implement the change in the primary file or module",
+        status: "pending",
+        depends_on: ["task-001"],
+        effort: "5min"
+      },
+      {
+        summary: "Verify the result with a focused test or manual check",
+        status: "pending",
+        depends_on: ["task-002"],
+        effort: "3min",
+        verification: "bun test or relevant verification"
+      }
+    ],
+    plannerMode: "builtin",
+    plannerSource: source
+  });
+}
+function updatePlanStatus(worktreePath, id, newStatus, updates) {
+  const idx = readPlanIndex(worktreePath);
+  if (!idx)
+    return "No plan index found";
+  const entry = idx.plans.find((p) => p.id === id);
+  if (!entry)
+    return `Plan ${id} not found`;
+  if (!validatePlanTransition(entry.status, newStatus)) {
+    return `Invalid transition: ${entry.status} \u2192 ${newStatus}. Valid: ${(VALID_TRANSITIONS[entry.status] || []).join(", ") || "none (terminal state)"}`;
+  }
+  entry.status = newStatus;
+  entry.updatedAt = now2();
+  if (updates?.done !== undefined)
+    entry.completed = updates.done;
+  if (updates?.total !== undefined)
+    entry.total = updates.total;
+  if (newStatus === "done" || newStatus === "abandoned") {
+    if (idx.activePlanId === id)
+      idx.activePlanId = null;
+  }
+  if (newStatus === "approved" || newStatus === "in_progress") {
+    idx.activePlanId = id;
+  }
+  idx.updatedAt = now2();
+  writePlanIndex(worktreePath, idx);
+  const plan = readPlanFile(worktreePath, id);
+  if (plan) {
+    plan.status = newStatus;
+    plan.updatedAt = now2();
+    writePlanFile(worktreePath, plan);
+  }
+  return null;
+}
+
+// src/plugin-routing.ts
+function applyFirstUserPlanGate(input) {
+  if (!input.messages?.length)
+    return;
+  const firstUser = input.messages.find((m) => m.info?.role === "user");
+  if (!firstUser || !firstUser.parts?.length)
+    return;
+  if (firstUser.parts.some((p) => p.type === "text" && typeof p.text === "string" && p.text.includes("EXTREMELY_IMPORTANT")))
+    return;
+  const parts = firstUser.parts;
+  const userText = parts.filter((p) => p.type === "text" && typeof p.text === "string").map((p) => p.text).join(" ");
+  if (!userText || userText.length >= 2000)
+    return;
+  incrementAttempt(input.executionContext);
+  try {
+    const intent = classifyIntent(userText);
+    if (!intent.isWork || !isValidProjectDir(input.worktreePath))
+      return;
+    const scope = classifyTaskScope(userText);
+    if (scope === "trivial")
+      return;
+    const existingPlan = getActivePlan(input.worktreePath);
+    if (existingPlan && existingPlan.status !== "done" && existingPlan.status !== "abandoned" && existingPlan.status !== "blocked")
+      return;
+    const result = scope === "complex" ? createPlan(input.worktreePath, { summary: userText, status: "draft" }) : createBuiltinPlan(input.worktreePath, userText, "auto");
+    if (result) {
+      const firstText = parts.find((p) => p.type === "text");
+      if (firstText && typeof firstText.text === "string") {
+        if (result.plan.status === "draft") {
+          firstText.text = `<PLAN_GATE>
+Plan ${result.id} created in DRAFT for: "${result.summary}"
+Tasks: ${result.plan.tasks.length}
+Gate: BLOCKED \u2014 this plan needs approval before any implementation.
+Approve: /plan transition ${result.id} approved
+</PLAN_GATE>
+
+${firstText.text}`;
+        } else {
+          firstText.text = `[plan:${result.id}] Auto-approved plan for: "${result.summary}". ${result.plan.tasks.length} tasks. Proceeding.
+
+${firstText.text}`;
+        }
+      }
+    }
+  } catch {}
+}
+
 // src/instinct.ts
-import * as fs3 from "fs";
-import * as path3 from "path";
+import * as fs6 from "fs";
+import * as path7 from "path";
 var VALID_SOURCES = ["git-history", "session-learning", "manual"];
 var VALID_STATUSES = ["active", "pending-review", "deprecated"];
 var STATUS_DISPLAY = [["active", "Active"], ["pending-review", "Pending Review"], ["deprecated", "Deprecated"]];
@@ -762,16 +1099,16 @@ function isValidStatus(val) {
   return VALID_STATUSES.includes(val);
 }
 function readInstincts(worktreePath) {
-  const dir = path3.join(worktreePath, ".opencode", "instincts");
+  const dir = path7.join(worktreePath, ".opencode", "instincts");
   try {
-    if (!fs3.existsSync(dir))
+    if (!fs6.existsSync(dir))
       return [];
-    const entries = fs3.readdirSync(dir, { withFileTypes: true });
+    const entries = fs6.readdirSync(dir, { withFileTypes: true });
     const results = [];
     for (const entry of entries) {
       if (!entry.isFile() || !entry.name.endsWith(".yaml"))
         continue;
-      const raw = readFileSafe(path3.join(dir, entry.name));
+      const raw = readFileSafe2(path7.join(dir, entry.name));
       if (!raw)
         continue;
       const instinct = parseInstinctYaml(raw);
@@ -783,9 +1120,9 @@ function readInstincts(worktreePath) {
     return [];
   }
 }
-function readFileSafe(filePath) {
+function readFileSafe2(filePath) {
   try {
-    return fs3.readFileSync(filePath, "utf8");
+    return fs6.readFileSync(filePath, "utf8");
   } catch {
     return "";
   }
@@ -830,308 +1167,88 @@ function buildInstinctStatusTable(instincts) {
 `);
 }
 
-// src/execution.ts
-var _ctx = {
-  attempt: 0,
-  struggleDetected: false,
-  lastErrorPattern: null,
-  compactionCount: 0
-};
-function getExecutionContext() {
-  return { ..._ctx };
-}
-function incrementAttempt() {
-  _ctx.attempt++;
-}
-function buildExecutionContextBlock() {
-  const ctx = getExecutionContext();
-  const yaml = [
-    "type: execution",
-    `attempt: ${ctx.attempt}`,
-    `struggle_detected: ${ctx.struggleDetected}`,
-    `compaction_count: ${ctx.compactionCount}`
-  ].join(`
-`);
-  return `<structured type="execution">
-${yaml}
-</structured>`;
+// src/plugin-commands.ts
+function handleCommandExecuteBefore(input, output) {
+  if (input.command === "plan") {
+    const planArgs = input.arguments?.trim() || "";
+    const planParts = planArgs.split(/\s+/);
+    const sub = planParts[0]?.toLowerCase();
+    if (!sub) {
+      output.parts = [{ type: "text", text: "Usage: /plan list | /plan status | /plan create <summary> | /plan transition <id> <status>", id: "", sessionID: "", messageID: "" }];
+      return true;
+    }
+    if (sub === "list") {
+      const idx = readPlanIndex(input.worktreePath);
+      if (!idx || idx.plans.length === 0) {
+        output.parts = [{ type: "text", text: "No plans found.", id: "", sessionID: "", messageID: "" }];
+        return true;
+      }
+      const lines = ["## Plans"];
+      for (const p of idx.plans)
+        lines.push(`- ${p.id}: ${p.summary} (${p.status}, ${p.completed}/${p.total})`);
+      output.parts = [{ type: "text", text: lines.join(`
+`), id: "", sessionID: "", messageID: "" }];
+      return true;
+    }
+    if (sub === "status") {
+      const active = getActivePlan(input.worktreePath);
+      output.parts = [{ type: "text", text: active ? `Active plan ${active.id}: ${active.summary} (${active.status}, ${active.completed}/${active.total})` : "No active plan.", id: "", sessionID: "", messageID: "" }];
+      return true;
+    }
+    if (sub === "create") {
+      const summary = planParts.slice(1).join(" ");
+      if (!summary) {
+        output.parts = [{ type: "text", text: "Usage: /plan create <summary>", id: "", sessionID: "", messageID: "" }];
+        return true;
+      }
+      const result = createPlan(input.worktreePath, { summary, status: "approved" });
+      if (result) {
+        output.parts = [{ type: "text", text: `Plan ${result.id} created and activated: "${summary}"`, id: "", sessionID: "", messageID: "" }];
+      } else {
+        output.parts = [{ type: "text", text: "Failed to create plan.", id: "", sessionID: "", messageID: "" }];
+      }
+      return true;
+    }
+    if (sub === "transition") {
+      const pid = planParts[1] || "";
+      const newStatus = planParts[2];
+      if (!pid || !newStatus) {
+        output.parts = [{ type: "text", text: "Usage: /plan transition <id> <status>", id: "", sessionID: "", messageID: "" }];
+        return true;
+      }
+      const VALID_STATUSES2 = ["draft", "approved", "in_progress", "done", "blocked", "abandoned"];
+      if (!VALID_STATUSES2.includes(newStatus)) {
+        output.parts = [{ type: "text", text: `Invalid status: "${newStatus}". Valid: ${VALID_STATUSES2.join(", ")}`, id: "", sessionID: "", messageID: "" }];
+        return true;
+      }
+      const err = updatePlanStatus(input.worktreePath, pid, newStatus);
+      output.parts = [{ type: "text", text: err ? `Error: ${err}` : `Plan ${pid} transitioned to ${newStatus}.`, id: "", sessionID: "", messageID: "" }];
+      return true;
+    }
+    output.parts = [{ type: "text", text: `Unknown: ${sub}. Try: list, status, create, transition`, id: "", sessionID: "", messageID: "" }];
+    return true;
+  }
+  if (input.command === "instinct") {
+    const instArgs = input.arguments?.trim() || "";
+    const instParts = instArgs.split(/\s+/);
+    const sub = instParts[0]?.toLowerCase();
+    if (sub === "status" || !sub) {
+      const instincts = readInstincts(input.worktreePath);
+      output.parts = [{ type: "text", text: buildInstinctStatusTable(instincts), id: "", sessionID: "", messageID: "" }];
+      return true;
+    }
+    output.parts = [{ type: "text", text: `Unknown instinct subcommand: "${sub}". Try: status`, id: "", sessionID: "", messageID: "" }];
+    return true;
+  }
+  return false;
 }
 
-// src/model-routing.ts
-import * as fs4 from "fs";
-import * as path4 from "path";
-import * as os2 from "os";
-var DEFAULT_MODEL = "opencode-go/deepseek-v4-flash";
-var REASONING_MODEL = "opencode-go/deepseek-v4-pro";
-var DEFAULT_REASONING_AGENTS = [
-  "planner",
-  "architect",
-  "code-reviewer",
-  "security-reviewer",
-  "tdd-guide",
-  "build-error-resolver",
-  "database-reviewer",
-  "doc-updater",
-  "e2e-runner",
-  "refactor-cleaner",
-  "plan-ceo-reviewer",
-  "plan-design-reviewer",
-  "plan-eng-reviewer",
-  "plan-devex-reviewer",
-  "harness-optimizer"
-];
-function getConfigPath() {
-  const home = process.env.USERPROFILE || os2.homedir();
-  return path4.join(home, ".config", "opencode", "openecc.json");
-}
-function generateDefaultConfig() {
-  const agents = {};
-  for (const name of DEFAULT_REASONING_AGENTS) {
-    agents[name] = REASONING_MODEL;
-  }
-  return {
-    enabled: true,
-    default_model: DEFAULT_MODEL,
-    agents
-  };
-}
-function writeConfig(configPath, config) {
-  const dir = path4.dirname(configPath);
-  if (!fs4.existsSync(dir))
-    fs4.mkdirSync(dir, { recursive: true });
-  fs4.writeFileSync(configPath, JSON.stringify(config, null, 2), "utf8");
-}
-function loadModelRoutingConfig() {
-  const configPath = getConfigPath();
-  try {
-    if (fs4.existsSync(configPath)) {
-      const raw = fs4.readFileSync(configPath, "utf8").trim();
-      if (raw) {
-        const parsed = JSON.parse(raw);
-        if (parsed.enabled === undefined)
-          parsed.enabled = true;
-        return parsed;
-      }
-    }
-  } catch {}
-  const defaults = generateDefaultConfig();
-  writeConfig(configPath, defaults);
-  return defaults;
-}
-function applyModelRouting(config, routing) {
-  if (!routing)
-    routing = loadModelRoutingConfig();
-  if (!routing.enabled)
-    return;
-  const defaultModel = routing.default_model || DEFAULT_MODEL;
-  const agentModels = routing.agents || {};
-  for (const [name, agentConfig] of Object.entries(config.agent || {})) {
-    const agent = agentConfig;
-    if (agent.model)
-      continue;
-    agent.model = agentModels[name] || defaultModel;
-  }
-}
-
-// src/discovery.ts
-import * as path5 from "path";
-import * as fs5 from "fs";
-import * as os3 from "os";
-import { fileURLToPath as fileURLToPath2 } from "url";
-function findPluginRoot(fromDir) {
-  for (let i = 0;i < 5; i++) {
-    const pj = path5.join(fromDir, "package.json");
-    if (fs5.existsSync(pj)) {
-      try {
-        const pkg = JSON.parse(fs5.readFileSync(pj, "utf8"));
-        if (pkg.name === "openecc")
-          return fromDir;
-      } catch {}
-    }
-    const parent = path5.resolve(fromDir, "..");
-    if (parent === fromDir)
-      break;
-    fromDir = parent;
-  }
-  return path5.resolve(fromDir, "..", "..");
-}
-var __dirname3 = path5.dirname(fileURLToPath2(import.meta.url));
-var pluginRoot = findPluginRoot(__dirname3);
-var BUNDLED_AGENTS_DIR = path5.join(pluginRoot, ".opencode", "prompts", "agents");
-var BUNDLED_COMMANDS_DIR = path5.join(pluginRoot, ".opencode", "commands");
-var BUNDLED_SKILLS_DIR = path5.join(pluginRoot, ".opencode", "skills");
-function readFileSafe2(filePath) {
-  try {
-    return fs5.readFileSync(filePath, "utf8");
-  } catch {
-    return "";
-  }
-}
-function stripYamlFrontmatter(content) {
-  return content.replace(/^---[\s\S]*?---\n/, "");
-}
-function parseCommandFrontmatter(content) {
-  const match = content.match(/^---\n([\s\S]*?)\n---/);
-  if (!match)
-    return {};
-  const result = {};
-  for (const line of match[1].split(`
-`)) {
-    const kv = line.match(/^(\w+):\s*(.+)$/);
-    if (kv) {
-      let value = kv[2].trim();
-      if (value === "true")
-        value = true;
-      else if (value === "false")
-        value = false;
-      else if (value.startsWith('"') && value.endsWith('"'))
-        value = value.slice(1, -1);
-      result[kv[1]] = value;
-    }
-  }
-  return result;
-}
-function inferAgentDesc(name, prompt) {
-  const firstLine = prompt.split(`
-`)[0]?.trim() || "";
-  if (firstLine) {
-    return firstLine.replace(/^You are an?\s+/i, "").replace(/\.$/, "");
-  }
-  return name.replace(/-/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
-}
-function inferAgentPermission(name) {
-  if (name === "search-agent" || name === "docs-lookup") {
-    return { edit: "deny", write: "deny", bash: "deny", task: "deny" };
-  }
-  if (name === "code-reviewer" || name === "planner" || name === "architect" || name.startsWith("plan-") && name.endsWith("-reviewer")) {
-    return { edit: "deny", write: "deny", task: "deny" };
-  }
-  return;
-}
-function homeDir() {
-  return process.env.USERPROFILE || os3.homedir();
-}
-function scanAgentDir(dir, source) {
-  const results = [];
-  try {
-    const entries = fs5.readdirSync(dir, { withFileTypes: true });
-    for (const entry of entries) {
-      if (!entry.isFile() || !entry.name.endsWith(".txt"))
-        continue;
-      const name = entry.name.slice(0, -4);
-      const prompt = readFileSafe2(path5.join(dir, entry.name));
-      if (!prompt)
-        continue;
-      results.push({ name, desc: inferAgentDesc(name, prompt), prompt, permission: inferAgentPermission(name), source });
-    }
-  } catch {}
-  return results;
-}
-function scanCommandDir(dir, source) {
-  const results = [];
-  try {
-    const entries = fs5.readdirSync(dir, { withFileTypes: true });
-    for (const entry of entries) {
-      if (!entry.isFile() || !entry.name.endsWith(".md"))
-        continue;
-      const name = entry.name.slice(0, -3);
-      const content = readFileSafe2(path5.join(dir, entry.name));
-      if (!content)
-        continue;
-      const fm = parseCommandFrontmatter(content);
-      const template = stripYamlFrontmatter(content);
-      if (!template)
-        continue;
-      results.push({
-        name,
-        desc: fm.description || name.replace(/-/g, " "),
-        template,
-        agent: fm.agent,
-        subtask: fm.subtask,
-        source
-      });
-    }
-  } catch {}
-  return results;
-}
-function scanSkillDir(dir) {
-  const results = [];
-  try {
-    const entries = fs5.readdirSync(dir, { withFileTypes: true });
-    for (const entry of entries) {
-      if (!entry.isDirectory())
-        continue;
-      if (fs5.existsSync(path5.join(dir, entry.name, "SKILL.md"))) {
-        results.push(path5.join(dir, entry.name));
-      }
-    }
-  } catch {}
-  return results;
-}
-function mergeByName(priorityGroups) {
-  const seen = new Map;
-  for (const group of priorityGroups) {
-    for (const item of group) {
-      if (!seen.has(item.name)) {
-        seen.set(item.name, item);
-      }
-    }
-  }
-  return [...seen.values()];
-}
-function globalDir(sub) {
-  return path5.join(homeDir(), ".config", "opencode", sub);
-}
-function workspaceDir(worktree, sub) {
-  return path5.join(worktree, ".opencode", sub);
-}
-var cachedAgents = null;
-var cachedCommands = null;
-var cachedSkills = null;
-function discoverAgents(worktreePath) {
-  if (cachedAgents)
-    return cachedAgents;
-  cachedAgents = mergeByName([
-    scanAgentDir(BUNDLED_AGENTS_DIR, "openecc"),
-    scanAgentDir(globalDir(path5.join("prompts", "agents")), "global"),
-    scanAgentDir(workspaceDir(worktreePath, path5.join("prompts", "agents")), "workspace")
-  ]);
-  return cachedAgents;
-}
-function discoverCommands(worktreePath) {
-  if (cachedCommands)
-    return cachedCommands;
-  cachedCommands = mergeByName([
-    scanCommandDir(BUNDLED_COMMANDS_DIR, "openecc"),
-    scanCommandDir(globalDir("commands"), "global"),
-    scanCommandDir(workspaceDir(worktreePath, "commands"), "workspace")
-  ]);
-  return cachedCommands;
-}
-function discoverSkills(worktreePath) {
-  if (cachedSkills)
-    return cachedSkills;
-  const bundled = scanSkillDir(BUNDLED_SKILLS_DIR);
-  const global = scanSkillDir(globalDir("skills"));
-  const workspace = scanSkillDir(workspaceDir(worktreePath, "skills"));
-  const seen = new Set;
-  const results = [];
-  for (const dir of [...bundled, ...global, ...workspace]) {
-    if (!seen.has(dir)) {
-      seen.add(dir);
-      results.push(dir);
-    }
-  }
-  cachedSkills = results;
-  return cachedSkills;
-}
-
-// src/plugin.ts
-var __dirname4 = path6.dirname(fileURLToPath3(import.meta.url));
-var agentsMDPath = path6.resolve(__dirname4, "..", "..", "AGENTS.md");
+// src/plugin-support.ts
+import * as fs7 from "fs";
+import * as path8 from "path";
 function readFileSafe3(filePath) {
   try {
-    return fs6.readFileSync(filePath, "utf8");
+    return fs7.readFileSync(filePath, "utf8");
   } catch {
     return "";
   }
@@ -1140,38 +1257,38 @@ function stripYamlFrontmatter2(content) {
   return content.replace(/^---[\s\S]*?---\n/, "");
 }
 function detectProject(cwd) {
-  let projectName = path6.basename(cwd);
+  let projectName = path8.basename(cwd);
   try {
-    const pkg = JSON.parse(fs6.readFileSync(path6.join(cwd, "package.json"), "utf8"));
+    const pkg = JSON.parse(fs7.readFileSync(path8.join(cwd, "package.json"), "utf8"));
     if (pkg.name)
       projectName = pkg.name;
   } catch {}
   const languages = [];
-  if (fs6.existsSync(path6.join(cwd, "tsconfig.json")))
+  if (fs7.existsSync(path8.join(cwd, "tsconfig.json")))
     languages.push("typescript");
-  if (fs6.existsSync(path6.join(cwd, "go.mod")))
+  if (fs7.existsSync(path8.join(cwd, "go.mod")))
     languages.push("go");
-  if (fs6.existsSync(path6.join(cwd, "Cargo.toml")))
+  if (fs7.existsSync(path8.join(cwd, "Cargo.toml")))
     languages.push("rust");
-  if (fs6.existsSync(path6.join(cwd, "pyproject.toml")))
+  if (fs7.existsSync(path8.join(cwd, "pyproject.toml")))
     languages.push("python");
-  if (fs6.existsSync(path6.join(cwd, "package.json")))
+  if (fs7.existsSync(path8.join(cwd, "package.json")))
     languages.push("javascript");
   const lockfiles = { "bun.lock": "bun", "bun.lockb": "bun", "pnpm-lock.yaml": "pnpm", "yarn.lock": "yarn", "package-lock.json": "npm" };
   let packageManager = "npm";
   for (const [lock, name] of Object.entries(lockfiles)) {
-    if (fs6.existsSync(path6.join(cwd, lock))) {
+    if (fs7.existsSync(path8.join(cwd, lock))) {
       packageManager = name;
       break;
     }
   }
   return { projectName, languages, packageManager };
 }
-function buildProjectProfileSection(p) {
+function buildProjectProfileSection(profile) {
   const lines = ["### Project Profile (auto-detected)"];
-  if (p.languages.length > 0)
-    lines.push(`- Languages: ${p.languages.join(", ")}`);
-  lines.push(`- Package manager: ${p.packageManager}`, "");
+  if (profile.languages.length > 0)
+    lines.push(`- Languages: ${profile.languages.join(", ")}`);
+  lines.push(`- Package manager: ${profile.packageManager}`, "");
   return lines.join(`
 `);
 }
@@ -1227,9 +1344,70 @@ var COMPLETION_CONTRACT = `### Before responding
 2. Did you verify results (not assume)?
 3. Is the response concise and synthesized?
 When done: place \`---\` followed by **Status:** \u2705 Done | \uD83D\uDEA7 Blocked | \uD83D\uDD04 In Progress`;
+function buildIdentityBlock(pkg, soulContent) {
+  return `<EXTREMELY_IMPORTANT>
+I am OpenECC, your engineering workflow layer.
+
+I know my version (\`${pkg.version}\`), my install path (\`${pkg.root}\`), and my job: route work to specialists, gate plans until approved, and never claim done without verification. I report to you directly with synthesized results. Everything else is delegated.
+
+You have a soul \u2014 the principles below are always active. They are ALREADY LOADED.
+
+${soulContent}
+</EXTREMELY_IMPORTANT>`;
+}
+function buildRuntimeBlock(pkg) {
+  return `<structured type="runtime">
+type: runtime
+openecc_version: ${pkg.version}
+package_root: ${pkg.root}
+skills_directory: ${pkg.skillsDir}
+</structured>`;
+}
+function buildSystemBootstrap(input) {
+  return [
+    buildIdentityBlock(input.pkg, input.soulContent),
+    buildRuntimeBlock(input.pkg),
+    input.executionBlock,
+    DELEGATOR_ROLE,
+    DELEGATION_ENFORCEMENT,
+    input.toolAccessBlock,
+    COMPLETION_CONTRACT,
+    buildProjectProfileSection(input.projectProfile)
+  ].join(`
+
+`);
+}
+function buildCompactionContext(input) {
+  const out = [];
+  out.push("# OpenECC Context (preserve across compaction)");
+  out.push("", `## OpenECC v${input.pkg.version}`);
+  out.push(`- Package root: ${input.pkg.root}`);
+  out.push("- Primary role: delegate to subagents, synthesize results, verify before claiming");
+  out.push("- Soul: Think Before Coding, Simplicity First, Surgical Changes, Goal-Driven Execution");
+  out.push("- Route by task type: planning, review, build-fix, TDD, docs, language-specific");
+  out.push("- Answer directly when no tools are needed", "");
+  if (input.projectProfile) {
+    out.push("## Project Profile");
+    out.push(`- Languages: ${input.projectProfile.languages.join(", ") || "none detected"}`);
+    out.push(`- Package manager: ${input.projectProfile.packageManager}`, "");
+  }
+  const edited = [...input.editedFiles];
+  if (edited.length > 0) {
+    out.push("## Recently Edited Files");
+    for (const f of edited)
+      out.push(`- ${f}`);
+    out.push("");
+  }
+  return out;
+}
+
+// src/plugin.ts
+var __dirname4 = path9.dirname(fileURLToPath3(import.meta.url));
+var agentsMDPath = path9.resolve(__dirname4, "..", "..", "AGENTS.md");
 var OpenECCPlugin = async ({ client, directory, worktree }) => {
   const worktreePath = worktree || directory;
   let projectProfile = null;
+  const executionContext = createExecutionContext();
   const editedFiles = new Set;
   return {
     "tool.definition": async (input, output) => {
@@ -1244,75 +1422,7 @@ var OpenECCPlugin = async ({ client, directory, worktree }) => {
       }
     },
     "command.execute.before": async (input, output) => {
-      if (input.command === "plan") {
-        const planArgs = input.arguments?.trim() || "";
-        const planParts = planArgs.split(/\s+/);
-        const sub = planParts[0]?.toLowerCase();
-        if (!sub) {
-          output.parts = [{ type: "text", text: "Usage: /plan list | /plan status | /plan create <summary> | /plan transition <id> <status>", id: "", sessionID: "", messageID: "" }];
-          return;
-        }
-        if (sub === "list") {
-          const idx = readPlanIndex(worktreePath);
-          if (!idx || idx.plans.length === 0) {
-            output.parts = [{ type: "text", text: "No plans found.", id: "", sessionID: "", messageID: "" }];
-            return;
-          }
-          const lines = ["## Plans"];
-          for (const p of idx.plans)
-            lines.push(`- ${p.id}: ${p.summary} (${p.status}, ${p.completed}/${p.total})`);
-          output.parts = [{ type: "text", text: lines.join(`
-`), id: "", sessionID: "", messageID: "" }];
-          return;
-        }
-        if (sub === "status") {
-          const active = getActivePlan(worktreePath);
-          output.parts = [{ type: "text", text: active ? `Active plan ${active.id}: ${active.summary} (${active.status}, ${active.completed}/${active.total})` : "No active plan.", id: "", sessionID: "", messageID: "" }];
-          return;
-        }
-        if (sub === "create") {
-          const summary = planParts.slice(1).join(" ");
-          if (!summary) {
-            output.parts = [{ type: "text", text: "Usage: /plan create <summary>", id: "", sessionID: "", messageID: "" }];
-            return;
-          }
-          const result = createPlan(worktreePath, { summary, status: "approved" });
-          if (result) {
-            output.parts = [{ type: "text", text: `Plan ${result.id} created and activated: "${summary}"`, id: "", sessionID: "", messageID: "" }];
-          } else {
-            output.parts = [{ type: "text", text: "Failed to create plan.", id: "", sessionID: "", messageID: "" }];
-          }
-          return;
-        }
-        if (sub === "transition") {
-          const pid = planParts[1] || "";
-          const newStatus = planParts[2];
-          if (!pid || !newStatus) {
-            output.parts = [{ type: "text", text: "Usage: /plan transition <id> <status>", id: "", sessionID: "", messageID: "" }];
-            return;
-          }
-          const VALID_STATUSES2 = ["draft", "approved", "in_progress", "done", "blocked", "abandoned"];
-          if (!VALID_STATUSES2.includes(newStatus)) {
-            output.parts = [{ type: "text", text: `Invalid status: "${newStatus}". Valid: ${VALID_STATUSES2.join(", ")}`, id: "", sessionID: "", messageID: "" }];
-            return;
-          }
-          const err = updatePlanStatus(worktreePath, pid, newStatus);
-          output.parts = [{ type: "text", text: err ? `Error: ${err}` : `Plan ${pid} transitioned to ${newStatus}.`, id: "", sessionID: "", messageID: "" }];
-          return;
-        }
-        output.parts = [{ type: "text", text: `Unknown: ${sub}. Try: list, status, create, transition`, id: "", sessionID: "", messageID: "" }];
-      }
-      if (input.command === "instinct") {
-        const instArgs = input.arguments?.trim() || "";
-        const instParts = instArgs.split(/\s+/);
-        const sub = instParts[0]?.toLowerCase();
-        if (sub === "status" || !sub) {
-          const instincts = readInstincts(worktreePath);
-          output.parts = [{ type: "text", text: buildInstinctStatusTable(instincts), id: "", sessionID: "", messageID: "" }];
-          return;
-        }
-        output.parts = [{ type: "text", text: `Unknown instinct subcommand: "${sub}". Try: status`, id: "", sessionID: "", messageID: "" }];
-      }
+      handleCommandExecuteBefore({ worktreePath, command: input.command, arguments: input.arguments }, output);
     },
     config: async (config) => {
       config.skills = config.skills || {};
@@ -1333,8 +1443,10 @@ var OpenECCPlugin = async ({ client, directory, worktree }) => {
           config.agent[agent.name] = agentConfig;
         }
       }
-      loadModelRoutingConfig();
-      applyModelRouting(config);
+      const routing = loadModelRoutingConfig();
+      const populated = populateAgentList(routing, Object.keys(config.agent));
+      writeConfig(getConfigPath(), populated);
+      applyModelRouting2(config, populated);
       config.command = config.command || {};
       for (const cmd of discoverCommands(worktreePath)) {
         if (!config.command[cmd.name]) {
@@ -1353,38 +1465,17 @@ $ARGUMENTS`,
       if (!projectProfile)
         projectProfile = detectProject(worktreePath);
       const pkg = getPackageInfo();
-      const soulPath = path6.join(pkg.skillsDir, "soul", "SKILL.md");
-      const soulContent = readFileSafe3(soulPath);
-      const cleanSoul = stripYamlFrontmatter2(soulContent);
-      const identityBlock = `<EXTREMELY_IMPORTANT>
-I am OpenECC, your engineering workflow layer.
-
-I know my version (\`${pkg.version}\`), my install path (\`${pkg.root}\`), and my job: route work to specialists, gate plans until approved, and never claim done without verification. I report to you directly with synthesized results. Everything else is delegated.
-
-You have a soul \u2014 the principles below are always active. They are ALREADY LOADED.
-
-${cleanSoul}
-</EXTREMELY_IMPORTANT>`;
-      const runtimeBlock = `<structured type="runtime">
-type: runtime
-openecc_version: ${pkg.version}
-package_root: ${pkg.root}
-skills_directory: ${pkg.skillsDir}
-</structured>`;
+      const soulPath = path9.join(pkg.skillsDir, "soul", "SKILL.md");
+      const cleanSoul = stripYamlFrontmatter2(readFileSafe3(soulPath));
       const systemMessages = output.systemMessages || [];
       if (!systemMessages.some((p) => p.text?.includes("EXTREMELY_IMPORTANT"))) {
-        const fullBootstrap = [
-          identityBlock,
-          runtimeBlock,
-          buildExecutionContextBlock(),
-          DELEGATOR_ROLE,
-          DELEGATION_ENFORCEMENT,
-          buildToolAccessBlock(),
-          COMPLETION_CONTRACT,
-          buildProjectProfileSection(projectProfile)
-        ].join(`
-
-`);
+        const fullBootstrap = buildSystemBootstrap({
+          pkg,
+          soulContent: cleanSoul,
+          projectProfile,
+          executionBlock: buildExecutionContextBlock(executionContext),
+          toolAccessBlock: buildToolAccessBlock()
+        });
         systemMessages.unshift({ type: "text", text: fullBootstrap });
         output.systemMessages = systemMessages;
       }
@@ -1409,69 +1500,12 @@ goal: ${activeEntry.summary}
       } catch {}
     },
     "experimental.chat.messages.transform": async (_input, output) => {
-      if (!output.messages?.length)
-        return;
-      const firstUser = output.messages.find((m) => m.info?.role === "user");
-      if (!firstUser || !firstUser.parts?.length)
-        return;
-      if (firstUser.parts.some((p) => p.type === "text" && typeof p.text === "string" && p.text.includes("EXTREMELY_IMPORTANT")))
-        return;
-      const parts = firstUser.parts;
-      const userText = parts.filter((p) => p.type === "text" && typeof p.text === "string").map((p) => p.text).join(" ");
-      if (!userText || userText.length >= 2000)
-        return;
-      incrementAttempt();
-      try {
-        const intent = classifyIntent(userText);
-        if (!intent.isWork || !isValidProjectDir(worktreePath))
-          return;
-        const scope = classifyTaskScope(userText);
-        if (scope === "trivial")
-          return;
-        const existingPlan = getActivePlan(worktreePath);
-        if (existingPlan && existingPlan.status !== "done" && existingPlan.status !== "abandoned" && existingPlan.status !== "blocked")
-          return;
-        const result = scope === "complex" ? createPlan(worktreePath, { summary: userText, status: "draft" }) : createBuiltinPlan(worktreePath, userText, "auto");
-        if (result) {
-          const firstText = parts.find((p) => p.type === "text");
-          if (firstText && typeof firstText.text === "string") {
-            if (result.plan.status === "draft") {
-              firstText.text = `<PLAN_GATE>
-Plan ${result.id} created in DRAFT for: "${result.summary}"
-Tasks: ${result.plan.tasks.length}
-Gate: BLOCKED \u2014 this plan needs approval before any implementation.
-Approve: /plan transition ${result.id} approved
-</PLAN_GATE>
-
-${firstText.text}`;
-            } else {
-              firstText.text = `[plan:${result.id}] Auto-approved plan for: "${result.summary}". ${result.plan.tasks.length} tasks. Proceeding.
-
-${firstText.text}`;
-            }
-          }
-        }
-      } catch {}
+      applyFirstUserPlanGate({ worktreePath, messages: output.messages, executionContext });
     },
     "experimental.session.compacting": async (_input, output) => {
       const pkg = getPackageInfo();
-      output.context.push("# OpenECC Context (preserve across compaction)");
-      output.context.push("", `## OpenECC v${pkg.version}`);
-      output.context.push(`- Package root: ${pkg.root}`);
-      output.context.push("- Primary role: delegate to subagents, synthesize results, verify before claiming");
-      output.context.push("- Soul: Think Before Coding, Simplicity First, Surgical Changes, Goal-Driven Execution");
-      output.context.push("- Route by task type: planning, review, build-fix, TDD, docs, language-specific");
-      output.context.push("- Answer directly when no tools are needed", "");
-      if (projectProfile) {
-        output.context.push("## Project Profile");
-        output.context.push(`- Languages: ${projectProfile.languages.join(", ") || "none detected"}`);
-        output.context.push(`- Package manager: ${projectProfile.packageManager}`, "");
-      }
-      if (editedFiles.size > 0) {
-        output.context.push("## Recently Edited Files");
-        for (const f of editedFiles)
-          output.context.push(`- ${f}`);
-        output.context.push("");
+      for (const line of buildCompactionContext({ pkg, projectProfile, editedFiles })) {
+        output.context.push(line);
       }
     },
     "file.edited": async (event) => {
