@@ -4,7 +4,11 @@ import * as path from "node:path"
 import * as os from "node:os"
 import { tool } from "@opencode-ai/plugin"
 
-const SCHEMA_VERSION = 2
+const SCHEMA_VERSION = 3
+const USAGE_RATIO_LOW = 0.15
+const USAGE_RATIO_HIGH = 0.3
+const USAGE_MIN_INJECTIONS = 5
+const INJECTION_EXPIRY_MS = 15000
 const MEMORY_DIR = path.join(os.homedir(), ".local", "share", "opencode", "memory")
 const MEMORY_DB = "memory.db"
 const PROFILE_USER = "memory-profile.wy"
@@ -70,6 +74,10 @@ interface MemoryStats {
   db_size: number
   profile_entries: number
   project_entries: number
+  total_injections: number
+  total_uses: number
+  avg_usage_ratio: number
+  archived_low_utility: number
 }
 
 interface MaintenanceResult {
@@ -118,6 +126,9 @@ export class MemoryStore {
   private db: Database | null = null
   private memoryDir: string
   private opened = false
+  private lastInjectedFactIds: number[] = []
+  private lastInjectedTime = 0
+  private usageCheckedCount = 0
 
   constructor(baseDir?: string) {
     this.memoryDir = baseDir ?? MEMORY_DIR
@@ -184,6 +195,8 @@ export class MemoryStore {
 
     try { db.exec("ALTER TABLE openecc_entries ADD COLUMN content_wy TEXT NOT NULL DEFAULT ''") } catch {}
     try { db.exec("ALTER TABLE openecc_entries ADD COLUMN source_ref TEXT NOT NULL DEFAULT ''") } catch {}
+    try { db.exec("ALTER TABLE openecc_facts ADD COLUMN times_injected INTEGER NOT NULL DEFAULT 0") } catch {}
+    try { db.exec("ALTER TABLE openecc_facts ADD COLUMN times_used INTEGER NOT NULL DEFAULT 0") } catch {}
 
     db.exec(`
       CREATE VIRTUAL TABLE IF NOT EXISTS openecc_entries_fts USING fts5(
@@ -208,7 +221,9 @@ export class MemoryStore {
         supersedes_id INTEGER,
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL,
-        active INTEGER NOT NULL DEFAULT 1
+        active INTEGER NOT NULL DEFAULT 1,
+        times_injected INTEGER NOT NULL DEFAULT 0,
+        times_used INTEGER NOT NULL DEFAULT 0
       )
     `)
 
@@ -493,10 +508,10 @@ export class MemoryStore {
 
     try {
       const topFacts = this.db!.query(`
-        SELECT content_wy, confidence FROM openecc_facts
+        SELECT id, content_wy, confidence FROM openecc_facts
         WHERE active = 1 AND tier IN ('profile', 'project', 'learned')
         ORDER BY confidence DESC, updated_at DESC LIMIT ?
-      `).all(MAX_FACTS_RETURNED) as { content_wy: string; confidence: number }[]
+      `).all(MAX_FACTS_RETURNED) as { id: number; content_wy: string; confidence: number }[]
       if (topFacts.length) {
         const lines: string[] = ["<memory type=\"facts\">"]
         for (const f of topFacts) {
@@ -507,6 +522,11 @@ export class MemoryStore {
         }
         lines.push("</memory>")
         blocks.push(lines.join("\n"))
+        this.lastInjectedFactIds = topFacts.map(f => f.id)
+        this.lastInjectedTime = Date.now()
+        for (const f of topFacts) {
+          try { this.db!.run("UPDATE openecc_facts SET times_injected = times_injected + 1, updated_at = ? WHERE id = ?", [Date.now(), f.id]) } catch {}
+        }
       }
     } catch {}
 
@@ -540,12 +560,14 @@ export class MemoryStore {
       if (results.facts.length || results.entries.length || results.summaries.length) {
         const lines: string[] = ["<memory type=\"retrieved\">"]
 
+        const seenFactIds: number[] = []
         for (const f of results.facts) {
           const entries = wylDecode(f.content_wy)
           for (const e of entries) {
             const match = this.matchWorktree(f.source_ref, worktree)
             lines.push("F|" + e.fields.slice(0, -1).join("|") + "|c:" + f.confidence.toFixed(1) + (match ? "|match" : ""))
           }
+          seenFactIds.push(f.id)
         }
 
         for (const e of results.entries) {
@@ -561,6 +583,15 @@ export class MemoryStore {
         }
         lines.push("</memory>")
         blocks.push(lines.join("\n"))
+
+        if (seenFactIds.length) {
+          this.lastInjectedFactIds = seenFactIds
+          this.lastInjectedTime = Date.now()
+          const now = Date.now()
+          for (const id of seenFactIds) {
+            try { this.db!.run("UPDATE openecc_facts SET times_injected = times_injected + 1, updated_at = ? WHERE id = ?", [now, id]) } catch {}
+          }
+        }
       }
     }
 
@@ -675,6 +706,33 @@ export class MemoryStore {
     this.writeProject(filtered)
   }
 
+  markFactUsed(factId: number): void {
+    const db = this.ensure()
+    try {
+      db.run("UPDATE openecc_facts SET times_used = times_used + 1, confidence = MIN(confidence + 0.05, 1.0), updated_at = ? WHERE id = ? AND active = 1",
+        [Date.now(), factId])
+    } catch {}
+  }
+
+  checkFactUsageFromArgs(toolName: string, args?: Record<string, unknown>): void {
+    const elapsed = Date.now() - this.lastInjectedTime
+    if (elapsed > INJECTION_EXPIRY_MS || !this.lastInjectedFactIds.length) return
+    const argText = Object.values(args ?? {}).join(" ").toLowerCase()
+    if (!argText || argText.length < 3) return
+    try {
+      const recentlyInjected = this.db!.query(
+        "SELECT id, scope, key, value FROM openecc_facts WHERE id IN (" + this.lastInjectedFactIds.join(",") + ") AND active = 1"
+      ).all() as { id: number; scope: string; key: string; value: string }[]
+      for (const fact of recentlyInjected) {
+        const searchTerms = [fact.scope, fact.key, fact.value].filter(t => t.length > 2).map(t => t.toLowerCase())
+        if (searchTerms.length && searchTerms.some(term => argText.includes(term))) {
+          this.markFactUsed(fact.id)
+          this.usageCheckedCount++
+        }
+      }
+    } catch {}
+  }
+
   consolidate(): number {
     const db = this.ensure()
     let merged = 0
@@ -702,6 +760,25 @@ export class MemoryStore {
       db.run("UPDATE openecc_facts SET confidence = ?, updated_at = ? WHERE id = ?",
         [boost, Date.now(), keep.id])
     }
+
+    // Usage-based adjustment: boost or penalize based on injection-to-usage ratio
+    const usageCandidates = db.query(`
+      SELECT id, times_injected, times_used, confidence FROM openecc_facts
+      WHERE active = 1 AND times_injected >= ?
+    `).all(USAGE_MIN_INJECTIONS) as { id: number; times_injected: number; times_used: number; confidence: number }[]
+
+    let archived = 0
+    for (const u of usageCandidates) {
+      const ratio = u.times_used / u.times_injected
+      if (ratio < USAGE_RATIO_LOW) {
+        db.run("UPDATE openecc_facts SET confidence = ROUND(confidence * 0.5, 2), updated_at = ? WHERE id = ?",
+          [Date.now(), u.id])
+      } else if (ratio > USAGE_RATIO_HIGH) {
+        db.run("UPDATE openecc_facts SET confidence = MIN(ROUND(confidence + 0.1, 2), 1.0), updated_at = ? WHERE id = ?",
+          [Date.now(), u.id])
+      }
+    }
+
     return merged
   }
 
@@ -713,7 +790,15 @@ export class MemoryStore {
        WHERE active = 1 AND tier IN ('episodic', 'working') AND updated_at < ? AND confidence < 0.3`,
       [Date.now(), cutoff]
     )
-    return result.changes
+
+    // Also archive actively unused facts with very low confidence from repeated penalties
+    const unusedResult = db.run(
+      `UPDATE openecc_facts SET active = 0, updated_at = ?
+       WHERE active = 1 AND times_injected >= ? AND times_used = 0 AND confidence < 0.2`,
+      [Date.now(), USAGE_MIN_INJECTIONS * 2]
+    )
+
+    return result.changes + unusedResult.changes
   }
 
   compactEntries(maxAgeDays = 90): number {
@@ -747,8 +832,16 @@ export class MemoryStore {
     function count(db: Database, sql: string): number {
       try { return (db.query(sql).get() as { c: number })?.c ?? 0 } catch { return 0 }
     }
+    function sum(db: Database, sql: string): number {
+      try { return (db.query(sql).get() as { s: number })?.s ?? 0 } catch { return 0 }
+    }
     let dbSize = 0
     try { dbSize = fs.statSync(this.wyFilePath(MEMORY_DB)).size } catch {}
+
+    const totalInjections = sum(this.db!, "SELECT COALESCE(SUM(times_injected),0) as s FROM openecc_facts WHERE active = 1")
+    const totalUses = sum(this.db!, "SELECT COALESCE(SUM(times_used),0) as s FROM openecc_facts WHERE active = 1")
+    const avgRatio = totalInjections > 0 ? parseFloat((totalUses / totalInjections).toFixed(2)) : 0
+    const archivedLow = count(this.db!, "SELECT COUNT(*) as c FROM openecc_facts WHERE active = 0 AND times_injected > 0")
 
     return {
       entries: count(this.db!, "SELECT COUNT(*) as c FROM openecc_entries"),
@@ -757,6 +850,10 @@ export class MemoryStore {
       db_size: dbSize,
       profile_entries: this.readProfile().length,
       project_entries: this.readProject().length,
+      total_injections: totalInjections,
+      total_uses: totalUses,
+      avg_usage_ratio: avgRatio,
+      archived_low_utility: archivedLow,
     }
   }
 }
@@ -829,16 +926,17 @@ export const memory_status = tool({
   async execute(_args, context) {
     const store = getStore()
     const s = store.stats()
+    const usageLine = s.total_injections > 0
+      ? `- Usage: ${s.total_uses}/${s.total_injections} (ratio ${s.avg_usage_ratio}) — archived ${s.archived_low_utility} low-utility facts`
+      : "- Usage: collecting..."
     return [
       "## Memory Status",
-      `- Entries: ${s.entries}`,
-      `- Active facts: ${s.facts}`,
-      `- Summaries: ${s.summaries}`,
+      `- Entries: ${s.entries}  |  Active facts: ${s.facts}  |  Summaries: ${s.summaries}`,
       `- Database: ${formatBytes(s.db_size)}`,
-      `- Profile entries: ${s.profile_entries}`,
-      `- Project entries: ${s.project_entries}`,
+      `- Profile: ${s.profile_entries} entries  |  Project: ${s.project_entries} entries`,
+      usageLine,
       "—",
-      "Self-maintaining. No manual cleanup needed.",
+      "Self-improving: facts boost confidence when used, decay when ignored. No manual tuning needed.",
     ].join("\n")
   },
 })
@@ -905,5 +1003,6 @@ export function onToolExecuted(
   if (entryPoint) {
     const store = getStore()
     store.captureEntry("", "tool", `${toolName}: ${entryPoint}`, toolName)
+    store.checkFactUsageFromArgs(toolName, args)
   }
 }

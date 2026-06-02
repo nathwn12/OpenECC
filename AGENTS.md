@@ -114,6 +114,26 @@ Default behavior — no skill load needed. Plain English triggers like "commit",
 
 Commit type from diff analysis: `feat` (new feature/module), `fix` (bug), `refactor` (restructure), `chore` (version bump, build), `docs` (docs only). Description is present tense, imperative, <72 chars.
 
+**Commit body rule**: TITLE ONLY. Never write a body or bullet-list description. The title must fully describe the change in <72 chars. No `- Adds`, `- Fixes`, `- Updates` bullet list. Ever.
+
+```
+<type>[optional scope]: <description>
+```
+
+| Type | Purpose |
+|------|---------|
+| `feat` | New feature |
+| `fix` | Bug fix |
+| `docs` | Documentation only |
+| `style` | Formatting/no logic change |
+| `refactor` | Code restructure (no feature/fix) |
+| `perf` | Performance improvement |
+| `test` | Add/update tests |
+| `build` | Build system/dependencies |
+| `ci` | CI/config changes |
+| `chore` | Maintenance/misc |
+| `revert` | Revert commit |
+
 ## Key Constraints
 
 - **Cache clear** for reinstall: `Remove-Item "$env:USERPROFILE\.cache\opencode\packages\openecc@git+https_*" -Recurse -Force`

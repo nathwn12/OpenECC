@@ -1407,7 +1407,11 @@ import * as fs8 from "fs";
 import * as path9 from "path";
 import * as os4 from "os";
 import { tool } from "@opencode-ai/plugin";
-var SCHEMA_VERSION = 2;
+var SCHEMA_VERSION = 3;
+var USAGE_RATIO_LOW = 0.15;
+var USAGE_RATIO_HIGH = 0.3;
+var USAGE_MIN_INJECTIONS = 5;
+var INJECTION_EXPIRY_MS = 15000;
 var MEMORY_DIR = path9.join(os4.homedir(), ".local", "share", "opencode", "memory");
 var MEMORY_DB = "memory.db";
 var PROFILE_USER = "memory-profile.wy";
@@ -1456,6 +1460,9 @@ class MemoryStore {
   db = null;
   memoryDir;
   opened = false;
+  lastInjectedFactIds = [];
+  lastInjectedTime = 0;
+  usageCheckedCount = 0;
   constructor(baseDir) {
     this.memoryDir = baseDir ?? MEMORY_DIR;
   }
@@ -1526,6 +1533,12 @@ class MemoryStore {
     try {
       db.exec("ALTER TABLE openecc_entries ADD COLUMN source_ref TEXT NOT NULL DEFAULT ''");
     } catch {}
+    try {
+      db.exec("ALTER TABLE openecc_facts ADD COLUMN times_injected INTEGER NOT NULL DEFAULT 0");
+    } catch {}
+    try {
+      db.exec("ALTER TABLE openecc_facts ADD COLUMN times_used INTEGER NOT NULL DEFAULT 0");
+    } catch {}
     db.exec(`
       CREATE VIRTUAL TABLE IF NOT EXISTS openecc_entries_fts USING fts5(
         content,
@@ -1548,7 +1561,9 @@ class MemoryStore {
         supersedes_id INTEGER,
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL,
-        active INTEGER NOT NULL DEFAULT 1
+        active INTEGER NOT NULL DEFAULT 1,
+        times_injected INTEGER NOT NULL DEFAULT 0,
+        times_used INTEGER NOT NULL DEFAULT 0
       )
     `);
     db.exec(`
@@ -1787,7 +1802,7 @@ class MemoryStore {
     }
     try {
       const topFacts = this.db.query(`
-        SELECT content_wy, confidence FROM openecc_facts
+        SELECT id, content_wy, confidence FROM openecc_facts
         WHERE active = 1 AND tier IN ('profile', 'project', 'learned')
         ORDER BY confidence DESC, updated_at DESC LIMIT ?
       `).all(MAX_FACTS_RETURNED);
@@ -1802,6 +1817,13 @@ class MemoryStore {
         lines.push("</memory>");
         blocks.push(lines.join(`
 `));
+        this.lastInjectedFactIds = topFacts.map((f) => f.id);
+        this.lastInjectedTime = Date.now();
+        for (const f of topFacts) {
+          try {
+            this.db.run("UPDATE openecc_facts SET times_injected = times_injected + 1, updated_at = ? WHERE id = ?", [Date.now(), f.id]);
+          } catch {}
+        }
       }
     } catch {}
     return blocks.join(`
@@ -1832,12 +1854,14 @@ class MemoryStore {
       const results = this.recall(query, MAX_RECALL);
       if (results.facts.length || results.entries.length || results.summaries.length) {
         const lines = ['<memory type="retrieved">'];
+        const seenFactIds = [];
         for (const f of results.facts) {
           const entries = wylDecode(f.content_wy);
           for (const e of entries) {
             const match = this.matchWorktree(f.source_ref, worktree);
             lines.push("F|" + e.fields.slice(0, -1).join("|") + "|c:" + f.confidence.toFixed(1) + (match ? "|match" : ""));
           }
+          seenFactIds.push(f.id);
         }
         for (const e of results.entries) {
           const entries = wylDecode(e.content);
@@ -1853,6 +1877,16 @@ class MemoryStore {
         lines.push("</memory>");
         blocks.push(lines.join(`
 `));
+        if (seenFactIds.length) {
+          this.lastInjectedFactIds = seenFactIds;
+          this.lastInjectedTime = Date.now();
+          const now3 = Date.now();
+          for (const id of seenFactIds) {
+            try {
+              this.db.run("UPDATE openecc_facts SET times_injected = times_injected + 1, updated_at = ? WHERE id = ?", [now3, id]);
+            } catch {}
+          }
+        }
       }
     }
     return blocks.join(`
@@ -1963,6 +1997,30 @@ class MemoryStore {
     filtered.push(wylFact("prj", key, value));
     this.writeProject(filtered);
   }
+  markFactUsed(factId) {
+    const db = this.ensure();
+    try {
+      db.run("UPDATE openecc_facts SET times_used = times_used + 1, confidence = MIN(confidence + 0.05, 1.0), updated_at = ? WHERE id = ? AND active = 1", [Date.now(), factId]);
+    } catch {}
+  }
+  checkFactUsageFromArgs(toolName, args) {
+    const elapsed = Date.now() - this.lastInjectedTime;
+    if (elapsed > INJECTION_EXPIRY_MS || !this.lastInjectedFactIds.length)
+      return;
+    const argText = Object.values(args ?? {}).join(" ").toLowerCase();
+    if (!argText || argText.length < 3)
+      return;
+    try {
+      const recentlyInjected = this.db.query("SELECT id, scope, key, value FROM openecc_facts WHERE id IN (" + this.lastInjectedFactIds.join(",") + ") AND active = 1").all();
+      for (const fact of recentlyInjected) {
+        const searchTerms = [fact.scope, fact.key, fact.value].filter((t) => t.length > 2).map((t) => t.toLowerCase());
+        if (searchTerms.length && searchTerms.some((term) => argText.includes(term))) {
+          this.markFactUsed(fact.id);
+          this.usageCheckedCount++;
+        }
+      }
+    } catch {}
+  }
   consolidate() {
     const db = this.ensure();
     let merged = 0;
@@ -1987,6 +2045,19 @@ class MemoryStore {
       const boost = Math.min(avgConf + 0.1, 1);
       db.run("UPDATE openecc_facts SET confidence = ?, updated_at = ? WHERE id = ?", [boost, Date.now(), keep.id]);
     }
+    const usageCandidates = db.query(`
+      SELECT id, times_injected, times_used, confidence FROM openecc_facts
+      WHERE active = 1 AND times_injected >= ?
+    `).all(USAGE_MIN_INJECTIONS);
+    let archived = 0;
+    for (const u of usageCandidates) {
+      const ratio = u.times_used / u.times_injected;
+      if (ratio < USAGE_RATIO_LOW) {
+        db.run("UPDATE openecc_facts SET confidence = ROUND(confidence * 0.5, 2), updated_at = ? WHERE id = ?", [Date.now(), u.id]);
+      } else if (ratio > USAGE_RATIO_HIGH) {
+        db.run("UPDATE openecc_facts SET confidence = MIN(ROUND(confidence + 0.1, 2), 1.0), updated_at = ? WHERE id = ?", [Date.now(), u.id]);
+      }
+    }
     return merged;
   }
   decay() {
@@ -1994,7 +2065,9 @@ class MemoryStore {
     const cutoff = Date.now() - 90 * 86400 * 1000;
     const result = db.run(`UPDATE openecc_facts SET active = 0, updated_at = ?
        WHERE active = 1 AND tier IN ('episodic', 'working') AND updated_at < ? AND confidence < 0.3`, [Date.now(), cutoff]);
-    return result.changes;
+    const unusedResult = db.run(`UPDATE openecc_facts SET active = 0, updated_at = ?
+       WHERE active = 1 AND times_injected >= ? AND times_used = 0 AND confidence < 0.2`, [Date.now(), USAGE_MIN_INJECTIONS * 2]);
+    return result.changes + unusedResult.changes;
   }
   compactEntries(maxAgeDays = 90) {
     const db = this.ensure();
@@ -2030,17 +2103,32 @@ class MemoryStore {
         return 0;
       }
     }
+    function sum(db, sql) {
+      try {
+        return db.query(sql).get()?.s ?? 0;
+      } catch {
+        return 0;
+      }
+    }
     let dbSize = 0;
     try {
       dbSize = fs8.statSync(this.wyFilePath(MEMORY_DB)).size;
     } catch {}
+    const totalInjections = sum(this.db, "SELECT COALESCE(SUM(times_injected),0) as s FROM openecc_facts WHERE active = 1");
+    const totalUses = sum(this.db, "SELECT COALESCE(SUM(times_used),0) as s FROM openecc_facts WHERE active = 1");
+    const avgRatio = totalInjections > 0 ? parseFloat((totalUses / totalInjections).toFixed(2)) : 0;
+    const archivedLow = count(this.db, "SELECT COUNT(*) as c FROM openecc_facts WHERE active = 0 AND times_injected > 0");
     return {
       entries: count(this.db, "SELECT COUNT(*) as c FROM openecc_entries"),
       facts: count(this.db, "SELECT COUNT(*) as c FROM openecc_facts WHERE active = 1"),
       summaries: count(this.db, "SELECT COUNT(*) as c FROM openecc_summaries"),
       db_size: dbSize,
       profile_entries: this.readProfile().length,
-      project_entries: this.readProject().length
+      project_entries: this.readProject().length,
+      total_injections: totalInjections,
+      total_uses: totalUses,
+      avg_usage_ratio: avgRatio,
+      archived_low_utility: archivedLow
     };
   }
 }
@@ -2103,16 +2191,15 @@ var memory_status = tool({
   async execute(_args, context) {
     const store = getStore();
     const s = store.stats();
+    const usageLine = s.total_injections > 0 ? `- Usage: ${s.total_uses}/${s.total_injections} (ratio ${s.avg_usage_ratio}) \u2014 archived ${s.archived_low_utility} low-utility facts` : "- Usage: collecting...";
     return [
       "## Memory Status",
-      `- Entries: ${s.entries}`,
-      `- Active facts: ${s.facts}`,
-      `- Summaries: ${s.summaries}`,
+      `- Entries: ${s.entries}  |  Active facts: ${s.facts}  |  Summaries: ${s.summaries}`,
       `- Database: ${formatBytes(s.db_size)}`,
-      `- Profile entries: ${s.profile_entries}`,
-      `- Project entries: ${s.project_entries}`,
+      `- Profile: ${s.profile_entries} entries  |  Project: ${s.project_entries} entries`,
+      usageLine,
       "\u2014",
-      "Self-maintaining. No manual cleanup needed."
+      "Self-improving: facts boost confidence when used, decay when ignored. No manual tuning needed."
     ].join(`
 `);
   }
@@ -2168,6 +2255,7 @@ function onToolExecuted(toolName, args) {
   if (entryPoint) {
     const store = getStore();
     store.captureEntry("", "tool", `${toolName}: ${entryPoint}`, toolName);
+    store.checkFactUsageFromArgs(toolName, args);
   }
 }
 
@@ -2312,10 +2400,10 @@ goal: ${activeEntry.summary}
       const filePath = input.args?.filePath;
       if ((input.tool === "edit" || input.tool === "write") && filePath) {
         editedFiles.add(filePath);
-        try {
-          onToolExecuted(input.tool, input.args);
-        } catch {}
       }
+      try {
+        onToolExecuted(input.tool, input.args);
+      } catch {}
     },
     "session.created": async (event) => {
       const pkg = getPackageInfo();

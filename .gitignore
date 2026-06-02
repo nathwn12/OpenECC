@@ -6,6 +6,9 @@ dist/
 PLAN-extractions.md
 .opencode/*
 !.opencode/plugins/
+!.opencode/prompts/
+!.opencode/commands/
+!.opencode/skills/
 .opencode/plugins/*
 !.opencode/plugins/openecc.js
 .openecc-test/

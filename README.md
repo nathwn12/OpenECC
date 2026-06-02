@@ -309,13 +309,23 @@ src/
 
 ## Clearing Cache
 
-Force a fresh installation:
+Force a clean reinstall — run one of these before restarting OpenCode:
+
+### Bash (cross-platform)
+
+Works on macOS, Linux, WSL, Git Bash, or any POSIX shell. The wildcard `@*` absorbs the full hash suffix.
+
+```bash
+rm -rf "$HOME/.cache/opencode/packages/openecc@"*
+```
+
+### PowerShell (Windows-native)
 
 ```powershell
 Remove-Item "$env:USERPROFILE\.cache\opencode\packages\openecc@git+https_*" -Recurse -Force
 ```
 
-Then restart OpenCode.
+Both commands target **only** the OpenECC plugin cache directory. No other state (config, plans, instincts, `auth.json`) is affected.
 
 ---
 

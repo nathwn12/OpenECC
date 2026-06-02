@@ -177,8 +177,8 @@ export const OpenECCPlugin: Plugin = async ({ client, directory, worktree }) => 
       const filePath = input.args?.filePath as string | undefined
       if ((input.tool === "edit" || input.tool === "write") && filePath) {
         editedFiles.add(filePath)
-        try { onToolExecuted(input.tool, input.args) } catch {}
       }
+      try { onToolExecuted(input.tool, input.args) } catch {}
     },
 
     "session.created": async (event: any) => {
