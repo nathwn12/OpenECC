@@ -26,6 +26,7 @@ import {
   memory_recall, memory_status,
   onSessionCreated, onSessionDeleted, onFileEdited, onToolExecuted,
   buildMemoryContinuityBlock,
+  injectSessionMemory, injectMessageMemory,
 } from "./memory"
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -129,10 +130,29 @@ export const OpenECCPlugin: Plugin = async ({ client, directory, worktree }) => 
           }
         }
       } catch {}
+
+      // Inject memory context (background — grows more useful over time)
+      try {
+        const memBlock = injectSessionMemory(worktreePath)
+        if (memBlock && !systemMessages.some((p: any) => p.text?.includes("memory type="))) {
+          systemMessages.push({ type: "text", text: memBlock })
+        }
+      } catch {}
     },
 
     "experimental.chat.messages.transform": async (_input, output: any) => {
       applyFirstUserPlanGate({ worktreePath, messages: output.messages, executionContext })
+
+      // Inject memory retrieved from user message (self-retrieving — no tool call needed)
+      try {
+        const userMsg = output.messages?.find((m: any) => m.role === "user")
+        if (userMsg && typeof userMsg.content === "string") {
+          const memBlock = injectMessageMemory(worktreePath, userMsg.content)
+          if (memBlock) {
+            output.messages.unshift({ role: "system", content: memBlock })
+          }
+        }
+      } catch {}
     },
 
     "experimental.session.compacting": async (_input, output: any) => {
@@ -167,7 +187,7 @@ export const OpenECCPlugin: Plugin = async ({ client, directory, worktree }) => 
       await client.app.log({ body: { service: "openecc", level: "info" as const, message: `Session started — OpenECC v${pkg.version} active` } })
       try { migrateOpeneccState(worktreePath) } catch {}
       // Init memory store, log session start, run lightweight maintenance
-      try { onSessionCreated(sessionId) } catch {}
+      try { onSessionCreated(sessionId, worktreePath) } catch {}
     },
 
     "session.deleted": async () => {

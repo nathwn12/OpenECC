@@ -4,9 +4,7 @@ import * as path from "node:path"
 import * as os from "node:os"
 import { tool } from "@opencode-ai/plugin"
 
-// ── Constants ──────────────────────────────────────────────────────────────
-
-const SCHEMA_VERSION = 1
+const SCHEMA_VERSION = 2
 const MEMORY_DIR = path.join(os.homedir(), ".local", "share", "opencode", "memory")
 const MEMORY_DB = "memory.db"
 const PROFILE_USER = "memory-profile.wy"
@@ -14,43 +12,15 @@ const PROFILE_PROJECT = "memory-project.wy"
 const MAX_RECALL = 10
 const MAX_PROFILE_ENTRIES = 20
 const MAX_PROJECT_ENTRIES = 30
-
-// ── wenyan-ultra codec ─────────────────────────────────────────────────────
-// Format: WY|<version>
-// Lines:  <type>|<field0>|<field1>|...|<fieldN>
-// Types:  F=fact  E=event  D=descriptor  S=summary
-// Compact by design: no fluff, no articles, no prose — LLM-first.
+const MAX_ENTRIES_RETURNED = 6
+const MAX_FACTS_RETURNED = 8
+const MAX_SUMMARIES_RETURNED = 3
+const WYL_HEADER = "WYL|v1"
 
 interface WyEntry {
   type: "F" | "E" | "D" | "S"
   fields: string[]
 }
-
-function wy_encode(entries: WyEntry[]): string {
-  const lines: string[] = [`WY|${SCHEMA_VERSION}`]
-  for (const e of entries) lines.push([e.type, ...e.fields].join("|"))
-  return lines.join("\n") + "\n"
-}
-
-function wy_decode(wy: string): WyEntry[] {
-  const entries: WyEntry[] = []
-  for (const line of wy.split("\n")) {
-    const t = line.trim()
-    if (!t || t.startsWith("#") || t.startsWith("WY|")) continue
-    const parts = t.split("|")
-    if (parts.length < 2) continue
-    const type = parts[0] as WyEntry["type"]
-    if (!["F", "E", "D", "S"].includes(type)) continue
-    entries.push({ type, fields: parts.slice(1) })
-  }
-  return entries
-}
-
-function wy_fact(scope: string, key: string, value: string, ts?: string): WyEntry {
-  return { type: "F", fields: [scope, key, value, ts ?? Date.now().toString(36)] }
-}
-
-// ── Row types ──────────────────────────────────────────────────────────────
 
 interface EntryRow {
   id: number
@@ -108,19 +78,50 @@ interface MaintenanceResult {
   archived: number
 }
 
-// ── MemoryStore ────────────────────────────────────────────────────────────
+function ts(): string {
+  return Date.now().toString(36)
+}
+
+function wylEncode(entries: WyEntry[]): string {
+  const lines: string[] = [WYL_HEADER]
+  for (const e of entries) lines.push([e.type, ...e.fields].join("|"))
+  return lines.join("\n") + "\n"
+}
+
+function wylDecode(wy: string): WyEntry[] {
+  const entries: WyEntry[] = []
+  for (const line of wy.split("\n")) {
+    const t = line.trim()
+    if (!t || t.startsWith("#") || t.startsWith(WYL_HEADER)) continue
+    const parts = t.split("|")
+    if (parts.length < 2) continue
+    const type = parts[0] as WyEntry["type"]
+    if (!["F", "E", "D", "S"].includes(type)) continue
+    entries.push({ type, fields: parts.slice(1) })
+  }
+  return entries
+}
+
+function wylFact(scope: string, key: string, value: string, time?: string): WyEntry {
+  return { type: "F", fields: [scope, key, value, time ?? ts()] }
+}
+
+function wylDir(worktree: string, summary: string, time?: string): WyEntry {
+  return { type: "D", fields: [worktree, summary, time ?? ts()] }
+}
+
+function wylSummary(sessionId: string, content: string, time?: string): WyEntry {
+  return { type: "S", fields: [sessionId, content, time ?? ts()] }
+}
 
 export class MemoryStore {
   private db: Database | null = null
   private memoryDir: string
   private opened = false
 
-  /** @param baseDir Optional override (defaults to ~/.local/share/opencode/memory/) */
   constructor(baseDir?: string) {
     this.memoryDir = baseDir ?? MEMORY_DIR
   }
-
-  // ── Lifecycle ──────────────────────────────────────────────────────────
 
   open(): void {
     if (this.opened) return
@@ -244,8 +245,6 @@ export class MemoryStore {
       )
     `)
 
-    // ── FTS sync triggers ──────────────────────────────────────────
-
     db.exec(`
       CREATE TRIGGER IF NOT EXISTS openecc_entries_ai
       AFTER INSERT ON openecc_entries BEGIN
@@ -318,13 +317,21 @@ export class MemoryStore {
     )
   }
 
-  // ── Capture ────────────────────────────────────────────────────────────
-
   captureEntry(session_id: string, kind: string, content: string, source = ""): void {
     const db = this.ensure()
+    const wyl = wylEncode([{ type: "E", fields: [kind, content.length > 240 ? content.slice(0, 240) + "…" : content, ts()] }])
     db.run(
       "INSERT INTO openecc_entries (session_id, kind, content, source, created_at) VALUES (?, ?, ?, ?, ?)",
-      [session_id, kind, content, source, Date.now()]
+      [session_id, kind, wyl, source, Date.now()]
+    )
+  }
+
+  captureDirVisit(worktree: string, summary: string): void {
+    const db = this.ensure()
+    const wyl = wylEncode([wylDir(worktree, summary)])
+    db.run(
+      "INSERT INTO openecc_entries (session_id, kind, content, source, created_at) VALUES (?, ?, ?, ?, ?)",
+      ["", "dir", wyl, worktree, Date.now()]
     )
   }
 
@@ -333,7 +340,7 @@ export class MemoryStore {
     source_ref = ""
   ): void {
     const db = this.ensure()
-    const wy = wy_encode([wy_fact(scope, key, value)])
+    const wy = wylEncode([wylFact(scope, key, value)])
 
     const existing = db.query(
       "SELECT id, value FROM openecc_facts WHERE scope = ? AND key = ? AND active = 1 ORDER BY updated_at DESC LIMIT 1"
@@ -373,8 +380,6 @@ export class MemoryStore {
       [session_id, kind, content_wy, range_start ?? null, range_end ?? null, Date.now()]
     )
   }
-
-  // ── Retrieval ──────────────────────────────────────────────────────────
 
   recall(query: string, limit = MAX_RECALL): RecallResult {
     this.ensure()
@@ -419,6 +424,147 @@ export class MemoryStore {
     } catch {}
 
     return { entries, facts, summaries }
+  }
+
+  retrieveContext(worktree?: string): string {
+    this.ensure()
+    const blocks: string[] = []
+
+    const profile = this.readWyFile(PROFILE_USER)
+    const project = this.readWyFile(PROFILE_PROJECT)
+    if (profile.length || project.length) {
+      const lines: string[] = ["<memory type=\"profile\">"]
+      if (profile.length) {
+        lines.push("P|")
+        for (const e of profile) lines.push(e.type + "|" + e.fields.slice(0, -1).join("|"))
+      }
+      if (project.length) {
+        lines.push("D|")
+        for (const e of project) lines.push(e.type + "|" + e.fields.slice(0, -1).join("|"))
+      }
+      lines.push("</memory>")
+      blocks.push(lines.join("\n"))
+    }
+
+    try {
+      let sql = `
+        SELECT content, source FROM openecc_entries
+        WHERE kind = 'dir' AND created_at > ?
+        ORDER BY created_at DESC LIMIT 3
+      `
+      const weekAgo = Date.now() - 7 * 86400 * 1000
+      const recentDirs = this.db!.query(sql).all(weekAgo) as { content: string; source: string }[]
+      if (recentDirs.length) {
+        const lines: string[] = ["<memory type=\"context\">"]
+        for (const d of recentDirs) {
+          const entries = wylDecode(d.content)
+          for (const e of entries) lines.push("D|" + e.fields.slice(0, -1).join("|"))
+        }
+        lines.push("</memory>")
+        blocks.push(lines.join("\n"))
+      }
+    } catch {}
+
+    if (worktree) {
+      try {
+        const matching = this.db!.query(`
+          SELECT content FROM openecc_entries
+          WHERE source = ? AND kind = 'dir'
+          ORDER BY created_at DESC LIMIT 1
+        `).all(worktree) as { content: string }[]
+        if (matching.length && !blocks.some(b => b.includes("active"))) {
+          const lines: string[] = ["<memory type=\"active\">"]
+          for (const m of matching) {
+            const entries = wylDecode(m.content)
+            for (const e of entries) {
+              lines.push("D|" + e.fields.slice(0, -1).join("|") + "|active")
+            }
+          }
+          lines.push("</memory>")
+          blocks.push(lines.join("\n"))
+        }
+      } catch {}
+    }
+
+    try {
+      const topFacts = this.db!.query(`
+        SELECT content_wy, confidence FROM openecc_facts
+        WHERE active = 1 AND tier IN ('profile', 'project', 'learned')
+        ORDER BY confidence DESC, updated_at DESC LIMIT ?
+      `).all(MAX_FACTS_RETURNED) as { content_wy: string; confidence: number }[]
+      if (topFacts.length) {
+        const lines: string[] = ["<memory type=\"facts\">"]
+        for (const f of topFacts) {
+          const entries = wylDecode(f.content_wy)
+          for (const e of entries) {
+            lines.push(e.type + "|" + e.fields.slice(0, -1).join("|") + "|c:" + f.confidence.toFixed(1))
+          }
+        }
+        lines.push("</memory>")
+        blocks.push(lines.join("\n"))
+      }
+    } catch {}
+
+    return blocks.join("\n")
+  }
+
+  retrieveForMessage(worktree: string, query: string): string {
+    this.ensure()
+    const blocks: string[] = []
+
+    try {
+      const matching = this.db!.query(`
+        SELECT id, content, created_at FROM openecc_entries
+        WHERE source = ? AND created_at > ?
+        ORDER BY created_at DESC LIMIT ?
+      `).all(worktree, Date.now() - 30 * 86400 * 1000, MAX_ENTRIES_RETURNED) as { id: number; content: string; created_at: number }[]
+
+      if (matching.length) {
+        const lines: string[] = ["<memory type=\"recent\">"]
+        for (const m of matching) {
+          const entries = wylDecode(m.content)
+          for (const e of entries) lines.push(e.type + "|" + e.fields.join("|") + "|wk:" + worktree.replace(/\\/g, "/").split("/").pop())
+        }
+        lines.push("</memory>")
+        blocks.push(lines.join("\n"))
+      }
+    } catch {}
+
+    if (query) {
+      const results = this.recall(query, MAX_RECALL)
+      if (results.facts.length || results.entries.length || results.summaries.length) {
+        const lines: string[] = ["<memory type=\"retrieved\">"]
+
+        for (const f of results.facts) {
+          const entries = wylDecode(f.content_wy)
+          for (const e of entries) {
+            const match = this.matchWorktree(f.source_ref, worktree)
+            lines.push("F|" + e.fields.slice(0, -1).join("|") + "|c:" + f.confidence.toFixed(1) + (match ? "|match" : ""))
+          }
+        }
+
+        for (const e of results.entries) {
+          const entries = wylDecode(e.content)
+          for (const entry of entries) {
+            lines.push(entry.type + "|" + entry.fields.join("|") + "|src:" + (e.source ? e.source.replace(/\\/g, "/").split("/").pop()! : "global"))
+          }
+        }
+
+        for (const s of results.summaries) {
+          const trimmed = s.content_wy.trim()
+          if (trimmed) lines.push("S|" + trimmed.replace(/\n/g, "\\n"))
+        }
+        lines.push("</memory>")
+        blocks.push(lines.join("\n"))
+      }
+    }
+
+    return blocks.join("\n")
+  }
+
+  private matchWorktree(sourceRef: string, worktree: string): boolean {
+    if (!sourceRef || !worktree) return false
+    return sourceRef.includes(worktree.replace(/\\/g, "/").split("/").pop()!)
   }
 
   buildMemoryContext(query?: string): string {
@@ -474,15 +620,13 @@ export class MemoryStore {
     return blocks.join("\n\n")
   }
 
-  // ── Profile file I/O ────────────────────────────────────────────────
-
   private wyFilePath(name: string): string {
     return path.join(this.memoryDir, name)
   }
 
   private readWyFile(name: string): WyEntry[] {
     try {
-      return wy_decode(fs.readFileSync(this.wyFilePath(name), "utf8"))
+      return wylDecode(fs.readFileSync(this.wyFilePath(name), "utf8"))
     } catch {
       return []
     }
@@ -491,7 +635,7 @@ export class MemoryStore {
   private writeWyFile(name: string, entries: WyEntry[]): void {
     const fp = this.wyFilePath(name)
     const tmp = fp + ".tmp." + process.pid
-    fs.writeFileSync(tmp, wy_encode(entries))
+    fs.writeFileSync(tmp, wylEncode(entries))
     fs.renameSync(tmp, fp)
   }
 
@@ -513,7 +657,7 @@ export class MemoryStore {
     const filtered = entries.filter(
       e => !(e.type === "F" && e.fields[0] === "usr" && e.fields[1] === key)
     )
-    filtered.push(wy_fact("usr", key, value))
+    filtered.push(wylFact("usr", key, value))
     this.writeProfile(filtered)
   }
 
@@ -522,11 +666,9 @@ export class MemoryStore {
     const filtered = entries.filter(
       e => !(e.type === "F" && e.fields[0] === "prj" && e.fields[1] === key)
     )
-    filtered.push(wy_fact("prj", key, value))
+    filtered.push(wylFact("prj", key, value))
     this.writeProject(filtered)
   }
-
-  // ── Maintenance ──────────────────────────────────────────────────────
 
   consolidate(): number {
     const db = this.ensure()
@@ -614,8 +756,6 @@ export class MemoryStore {
   }
 }
 
-// ── Singleton ──────────────────────────────────────────────────────────────
-
 let _store: MemoryStore | null = null
 
 function getStore(): MemoryStore {
@@ -633,12 +773,9 @@ function closeStore(): void {
   }
 }
 
-/** Re-init (for testing) */
 export function resetMemoryStore(): void {
   closeStore()
 }
-
-// ── Tools ──────────────────────────────────────────────────────────────────
 
 export const memory_recall = tool({
   description: "Search persistent local memory for facts, decisions, and context from this or previous sessions. Results include stable profile facts, learned facts, past summaries, and journal entries. Call this when you need to recall user preferences, project conventions, past decisions, or any contextual information the model may not remember.",
@@ -670,7 +807,8 @@ export const memory_recall = tool({
     if (results.entries.length) {
       parts.push("## Journal Entries")
       for (const e of results.entries) {
-        const preview = e.content.length > 200 ? e.content.slice(0, 200) + "…" : e.content
+        const entries = wylDecode(e.content)
+        const preview = entries.length ? entries[0].fields.join("|") : (e.content.length > 200 ? e.content.slice(0, 200) + "…" : e.content)
         parts.push(`- [${e.kind}] ${preview}`)
       }
     }
@@ -706,9 +844,21 @@ function formatBytes(bytes: number): string {
   return (bytes / 1048576).toFixed(1) + " MB"
 }
 
+// ── Auto-injection hooks (called from plugin.ts) ──────────────────────────
+
+export function injectSessionMemory(worktree?: string): string {
+  const store = getStore()
+  return store.retrieveContext(worktree)
+}
+
+export function injectMessageMemory(worktree: string, userMessage: string): string {
+  const store = getStore()
+  return store.retrieveForMessage(worktree, userMessage)
+}
+
 // ── Context builder (for compaction hook) ──────────────────────────────────
 
-export function buildMemoryContinuityBlock(): string {
+export function buildMemoryContinuityBlock(worktree?: string): string {
   const store = getStore()
   const ctx = store.buildMemoryContext()
   if (!ctx) return ""
@@ -724,9 +874,13 @@ export function buildMemoryContinuityBlock(): string {
 
 // ── Lifecycle helpers (for plugin hooks) ───────────────────────────────────
 
-export function onSessionCreated(sessionId: string): void {
+export function onSessionCreated(sessionId: string, worktree?: string): void {
   const store = getStore()
   store.captureEntry(sessionId, "session", "session_start")
+  if (worktree) {
+    const dirName = worktree.replace(/\\/g, "/").split("/").pop() || worktree
+    store.captureDirVisit(worktree, dirName)
+  }
   store.runMaintenance()
 }
 

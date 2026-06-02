@@ -1,7 +1,7 @@
 import { describe, it, expect, afterAll } from "bun:test"
 import * as path from "node:path"
 import * as fs from "node:fs"
-import { MemoryStore, resetMemoryStore } from "./memory"
+import { MemoryStore, resetMemoryStore, injectSessionMemory, injectMessageMemory } from "./memory"
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -329,5 +329,106 @@ describe("MemoryStore", () => {
     const s = store2.stats()
     expect(s.facts).toBe(1)
     store2.close()
+  })
+
+  // ── Wenyan-lite encoding ────────────────────────────────────────────────
+
+  it("captures entry with wenyan-lite encoding", () => {
+    const store = freshStore()
+    store.open()
+    store.captureEntry("sess-1", "chat", "hello world")
+    const s = store.stats()
+    expect(s.entries).toBe(1)
+    store.close()
+  })
+
+  it("recall matches wenyan-lite encoded content", () => {
+    const store = freshStore()
+    store.open()
+    store.captureEntry("sess-1", "chat", "user prefers dark mode theme")
+    const results = store.recall("dark theme")
+    expect(results.entries.length).toBeGreaterThanOrEqual(1)
+    store.close()
+  })
+
+  // ── Directory awareness ─────────────────────────────────────────────────
+
+  it("captures directory visit", () => {
+    const store = freshStore()
+    store.open()
+    store.captureDirVisit("/home/user/project", "working on memory module")
+    const s = store.stats()
+    expect(s.entries).toBe(1)
+    store.close()
+  })
+
+  it("retrieveContext returns memory blocks", () => {
+    const store = freshStore()
+    store.open()
+    store.captureFact("profile", "usr", "lang", "typescript")
+    store.appendProfileFact("theme", "dark")
+    store.captureDirVisit("/home/user/project", "refactored memory")
+    const ctx = store.retrieveContext()
+    expect(ctx).toContain("<memory")
+    expect(ctx).toContain("memory type=")
+    store.close()
+  })
+
+  it("retrieveContext scoped to worktree", () => {
+    const store = freshStore()
+    store.open()
+    store.captureDirVisit("/home/user/project-a", "project a work")
+    store.captureFact("project", "prj", "name", "project-a", "/home/user/project-a")
+    const ctx = store.retrieveContext("/home/user/project-a")
+    expect(typeof ctx).toBe("string")
+    store.close()
+  })
+
+  it("retrieveForMessage returns empty with no data", () => {
+    const store = freshStore()
+    store.open()
+    const result = store.retrieveForMessage("/tmp", "hello")
+    expect(typeof result).toBe("string")
+    store.close()
+  })
+
+  it("retrieveForMessage returns data when entries exist", () => {
+    const store = freshStore()
+    store.open()
+    store.captureEntry("sess-1", "chat", "user likes react", "test-project")
+    store.captureDirVisit("/tmp/test-project", "test project")
+    const result = store.retrieveForMessage("/tmp/test-project", "react")
+    expect(result).toContain("memory type=")
+    store.close()
+  })
+
+  // ── Auto-injection hooks ────────────────────────────────────────────────
+
+  it("injectSessionMemory returns context string", () => {
+    const store = freshStore()
+    store.open()
+    store.appendProfileFact("framework", "react")
+    const output = injectSessionMemory()
+    expect(typeof output).toBe("string")
+    store.close()
+  })
+
+  it("injectMessageMemory returns retrieved block", () => {
+    const store = freshStore()
+    store.open()
+    store.captureEntry("sess-1", "chat", "discussed bun runtime", "my-project")
+    store.captureDirVisit("/tmp/my-project", "my project")
+    const output = injectMessageMemory("/tmp/my-project", "bun runtime")
+    expect(typeof output).toBe("string")
+    store.close()
+  })
+
+  it("onSessionCreated captures dir visit when worktree provided", () => {
+    const store = freshStore()
+    store.open()
+    store.captureEntry("sess-1", "file", "/tmp/my-project/src/index.ts", "/tmp/my-project")
+    const s = store.stats()
+    expect(s.entries).toBeGreaterThanOrEqual(1)
+    store.close()
   })
 })

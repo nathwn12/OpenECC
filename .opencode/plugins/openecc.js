@@ -1407,7 +1407,7 @@ import * as fs8 from "fs";
 import * as path9 from "path";
 import * as os4 from "os";
 import { tool } from "@opencode-ai/plugin";
-var SCHEMA_VERSION = 1;
+var SCHEMA_VERSION = 2;
 var MEMORY_DIR = path9.join(os4.homedir(), ".local", "share", "opencode", "memory");
 var MEMORY_DB = "memory.db";
 var PROFILE_USER = "memory-profile.wy";
@@ -1415,20 +1415,26 @@ var PROFILE_PROJECT = "memory-project.wy";
 var MAX_RECALL = 10;
 var MAX_PROFILE_ENTRIES = 20;
 var MAX_PROJECT_ENTRIES = 30;
-function wy_encode(entries) {
-  const lines = [`WY|${SCHEMA_VERSION}`];
+var MAX_ENTRIES_RETURNED = 6;
+var MAX_FACTS_RETURNED = 8;
+var WYL_HEADER = "WYL|v1";
+function ts() {
+  return Date.now().toString(36);
+}
+function wylEncode(entries) {
+  const lines = [WYL_HEADER];
   for (const e of entries)
     lines.push([e.type, ...e.fields].join("|"));
   return lines.join(`
 `) + `
 `;
 }
-function wy_decode(wy) {
+function wylDecode(wy) {
   const entries = [];
   for (const line of wy.split(`
 `)) {
     const t = line.trim();
-    if (!t || t.startsWith("#") || t.startsWith("WY|"))
+    if (!t || t.startsWith("#") || t.startsWith(WYL_HEADER))
       continue;
     const parts = t.split("|");
     if (parts.length < 2)
@@ -1440,10 +1446,12 @@ function wy_decode(wy) {
   }
   return entries;
 }
-function wy_fact(scope, key, value, ts) {
-  return { type: "F", fields: [scope, key, value, ts ?? Date.now().toString(36)] };
+function wylFact(scope, key, value, time) {
+  return { type: "F", fields: [scope, key, value, time ?? ts()] };
 }
-
+function wylDir(worktree, summary, time) {
+  return { type: "D", fields: [worktree, summary, time ?? ts()] };
+}
 class MemoryStore {
   db = null;
   memoryDir;
@@ -1636,11 +1644,17 @@ class MemoryStore {
   }
   captureEntry(session_id, kind, content, source = "") {
     const db = this.ensure();
-    db.run("INSERT INTO openecc_entries (session_id, kind, content, source, created_at) VALUES (?, ?, ?, ?, ?)", [session_id, kind, content, source, Date.now()]);
+    const wyl = wylEncode([{ type: "E", fields: [kind, content.length > 240 ? content.slice(0, 240) + "\u2026" : content, ts()] }]);
+    db.run("INSERT INTO openecc_entries (session_id, kind, content, source, created_at) VALUES (?, ?, ?, ?, ?)", [session_id, kind, wyl, source, Date.now()]);
+  }
+  captureDirVisit(worktree, summary) {
+    const db = this.ensure();
+    const wyl = wylEncode([wylDir(worktree, summary)]);
+    db.run("INSERT INTO openecc_entries (session_id, kind, content, source, created_at) VALUES (?, ?, ?, ?, ?)", ["", "dir", wyl, worktree, Date.now()]);
   }
   captureFact(tier, scope, key, value, source_ref = "") {
     const db = this.ensure();
-    const wy = wy_encode([wy_fact(scope, key, value)]);
+    const wy = wylEncode([wylFact(scope, key, value)]);
     const existing = db.query("SELECT id, value FROM openecc_facts WHERE scope = ? AND key = ? AND active = 1 ORDER BY updated_at DESC LIMIT 1").get(scope, key);
     if (existing) {
       if (existing.value !== value) {
@@ -1700,6 +1714,146 @@ class MemoryStore {
       summaries.push(...rows);
     } catch {}
     return { entries, facts, summaries };
+  }
+  retrieveContext(worktree) {
+    this.ensure();
+    const blocks = [];
+    const profile = this.readWyFile(PROFILE_USER);
+    const project = this.readWyFile(PROFILE_PROJECT);
+    if (profile.length || project.length) {
+      const lines = ['<memory type="profile">'];
+      if (profile.length) {
+        lines.push("P|");
+        for (const e of profile)
+          lines.push(e.type + "|" + e.fields.slice(0, -1).join("|"));
+      }
+      if (project.length) {
+        lines.push("D|");
+        for (const e of project)
+          lines.push(e.type + "|" + e.fields.slice(0, -1).join("|"));
+      }
+      lines.push("</memory>");
+      blocks.push(lines.join(`
+`));
+    }
+    try {
+      let sql = `
+        SELECT content, source FROM openecc_entries
+        WHERE kind = 'dir' AND created_at > ?
+        ORDER BY created_at DESC LIMIT 3
+      `;
+      const weekAgo = Date.now() - 7 * 86400 * 1000;
+      const recentDirs = this.db.query(sql).all(weekAgo);
+      if (recentDirs.length) {
+        const lines = ['<memory type="context">'];
+        for (const d of recentDirs) {
+          const entries = wylDecode(d.content);
+          for (const e of entries)
+            lines.push("D|" + e.fields.slice(0, -1).join("|"));
+        }
+        lines.push("</memory>");
+        blocks.push(lines.join(`
+`));
+      }
+    } catch {}
+    if (worktree) {
+      try {
+        const matching = this.db.query(`
+          SELECT content FROM openecc_entries
+          WHERE source = ? AND kind = 'dir'
+          ORDER BY created_at DESC LIMIT 1
+        `).all(worktree);
+        if (matching.length && !blocks.some((b) => b.includes("active"))) {
+          const lines = ['<memory type="active">'];
+          for (const m of matching) {
+            const entries = wylDecode(m.content);
+            for (const e of entries) {
+              lines.push("D|" + e.fields.slice(0, -1).join("|") + "|active");
+            }
+          }
+          lines.push("</memory>");
+          blocks.push(lines.join(`
+`));
+        }
+      } catch {}
+    }
+    try {
+      const topFacts = this.db.query(`
+        SELECT content_wy, confidence FROM openecc_facts
+        WHERE active = 1 AND tier IN ('profile', 'project', 'learned')
+        ORDER BY confidence DESC, updated_at DESC LIMIT ?
+      `).all(MAX_FACTS_RETURNED);
+      if (topFacts.length) {
+        const lines = ['<memory type="facts">'];
+        for (const f of topFacts) {
+          const entries = wylDecode(f.content_wy);
+          for (const e of entries) {
+            lines.push(e.type + "|" + e.fields.slice(0, -1).join("|") + "|c:" + f.confidence.toFixed(1));
+          }
+        }
+        lines.push("</memory>");
+        blocks.push(lines.join(`
+`));
+      }
+    } catch {}
+    return blocks.join(`
+`);
+  }
+  retrieveForMessage(worktree, query) {
+    this.ensure();
+    const blocks = [];
+    try {
+      const matching = this.db.query(`
+        SELECT id, content, created_at FROM openecc_entries
+        WHERE source = ? AND created_at > ?
+        ORDER BY created_at DESC LIMIT ?
+      `).all(worktree, Date.now() - 30 * 86400 * 1000, MAX_ENTRIES_RETURNED);
+      if (matching.length) {
+        const lines = ['<memory type="recent">'];
+        for (const m of matching) {
+          const entries = wylDecode(m.content);
+          for (const e of entries)
+            lines.push(e.type + "|" + e.fields.join("|") + "|wk:" + worktree.replace(/\\/g, "/").split("/").pop());
+        }
+        lines.push("</memory>");
+        blocks.push(lines.join(`
+`));
+      }
+    } catch {}
+    if (query) {
+      const results = this.recall(query, MAX_RECALL);
+      if (results.facts.length || results.entries.length || results.summaries.length) {
+        const lines = ['<memory type="retrieved">'];
+        for (const f of results.facts) {
+          const entries = wylDecode(f.content_wy);
+          for (const e of entries) {
+            const match = this.matchWorktree(f.source_ref, worktree);
+            lines.push("F|" + e.fields.slice(0, -1).join("|") + "|c:" + f.confidence.toFixed(1) + (match ? "|match" : ""));
+          }
+        }
+        for (const e of results.entries) {
+          const entries = wylDecode(e.content);
+          for (const entry of entries) {
+            lines.push(entry.type + "|" + entry.fields.join("|") + "|src:" + (e.source ? e.source.replace(/\\/g, "/").split("/").pop() : "global"));
+          }
+        }
+        for (const s of results.summaries) {
+          const trimmed = s.content_wy.trim();
+          if (trimmed)
+            lines.push("S|" + trimmed.replace(/\n/g, "\\n"));
+        }
+        lines.push("</memory>");
+        blocks.push(lines.join(`
+`));
+      }
+    }
+    return blocks.join(`
+`);
+  }
+  matchWorktree(sourceRef, worktree) {
+    if (!sourceRef || !worktree)
+      return false;
+    return sourceRef.includes(worktree.replace(/\\/g, "/").split("/").pop());
   }
   buildMemoryContext(query) {
     this.ensure();
@@ -1762,7 +1916,7 @@ class MemoryStore {
   }
   readWyFile(name) {
     try {
-      return wy_decode(fs8.readFileSync(this.wyFilePath(name), "utf8"));
+      return wylDecode(fs8.readFileSync(this.wyFilePath(name), "utf8"));
     } catch {
       return [];
     }
@@ -1770,7 +1924,7 @@ class MemoryStore {
   writeWyFile(name, entries) {
     const fp = this.wyFilePath(name);
     const tmp = fp + ".tmp." + process.pid;
-    fs8.writeFileSync(tmp, wy_encode(entries));
+    fs8.writeFileSync(tmp, wylEncode(entries));
     fs8.renameSync(tmp, fp);
   }
   readProfile() {
@@ -1792,13 +1946,13 @@ class MemoryStore {
   appendProfileFact(key, value) {
     const entries = this.readProfile();
     const filtered = entries.filter((e) => !(e.type === "F" && e.fields[0] === "usr" && e.fields[1] === key));
-    filtered.push(wy_fact("usr", key, value));
+    filtered.push(wylFact("usr", key, value));
     this.writeProfile(filtered);
   }
   appendProjectFact(key, value) {
     const entries = this.readProject();
     const filtered = entries.filter((e) => !(e.type === "F" && e.fields[0] === "prj" && e.fields[1] === key));
-    filtered.push(wy_fact("prj", key, value));
+    filtered.push(wylFact("prj", key, value));
     this.writeProject(filtered);
   }
   consolidate() {
@@ -1923,7 +2077,8 @@ var memory_recall = tool({
     if (results.entries.length) {
       parts.push("## Journal Entries");
       for (const e of results.entries) {
-        const preview = e.content.length > 200 ? e.content.slice(0, 200) + "\u2026" : e.content;
+        const entries = wylDecode(e.content);
+        const preview = entries.length ? entries[0].fields.join("|") : e.content.length > 200 ? e.content.slice(0, 200) + "\u2026" : e.content;
         parts.push(`- [${e.kind}] ${preview}`);
       }
     }
@@ -1961,7 +2116,15 @@ function formatBytes(bytes) {
     return (bytes / 1024).toFixed(1) + " KB";
   return (bytes / 1048576).toFixed(1) + " MB";
 }
-function buildMemoryContinuityBlock() {
+function injectSessionMemory(worktree) {
+  const store = getStore();
+  return store.retrieveContext(worktree);
+}
+function injectMessageMemory(worktree, userMessage) {
+  const store = getStore();
+  return store.retrieveForMessage(worktree, userMessage);
+}
+function buildMemoryContinuityBlock(worktree) {
   const store = getStore();
   const ctx = store.buildMemoryContext();
   if (!ctx)
@@ -1976,9 +2139,13 @@ function buildMemoryContinuityBlock() {
   ].join(`
 `);
 }
-function onSessionCreated(sessionId) {
+function onSessionCreated(sessionId, worktree) {
   const store = getStore();
   store.captureEntry(sessionId, "session", "session_start");
+  if (worktree) {
+    const dirName = worktree.replace(/\\/g, "/").split("/").pop() || worktree;
+    store.captureDirVisit(worktree, dirName);
+  }
   store.runMaintenance();
 }
 function onSessionDeleted() {
@@ -2097,9 +2264,24 @@ goal: ${activeEntry.summary}
           }
         }
       } catch {}
+      try {
+        const memBlock = injectSessionMemory(worktreePath);
+        if (memBlock && !systemMessages.some((p) => p.text?.includes("memory type="))) {
+          systemMessages.push({ type: "text", text: memBlock });
+        }
+      } catch {}
     },
     "experimental.chat.messages.transform": async (_input, output) => {
       applyFirstUserPlanGate({ worktreePath, messages: output.messages, executionContext });
+      try {
+        const userMsg = output.messages?.find((m) => m.role === "user");
+        if (userMsg && typeof userMsg.content === "string") {
+          const memBlock = injectMessageMemory(worktreePath, userMsg.content);
+          if (memBlock) {
+            output.messages.unshift({ role: "system", content: memBlock });
+          }
+        }
+      } catch {}
     },
     "experimental.session.compacting": async (_input, output) => {
       const pkg = getPackageInfo();
@@ -2135,7 +2317,7 @@ goal: ${activeEntry.summary}
         migrateOpeneccState(worktreePath);
       } catch {}
       try {
-        onSessionCreated(sessionId);
+        onSessionCreated(sessionId, worktreePath);
       } catch {}
     },
     "session.deleted": async () => {
