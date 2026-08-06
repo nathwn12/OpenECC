@@ -1,23 +1,33 @@
 ---
-description: "Run quality gate: format, lint, type-check, test, security scan"
+description: "Run the ECC quality pipeline for a file or project scope"
 ---
 
 # Quality Gate Command
 
-Run the quality pipeline for: $ARGUMENTS
+Run the ECC quality pipeline on demand for a file or project scope.
+
+## Usage
+
+`/quality-gate [path|.] [--fix] [--strict]`
+
+- default target: current directory (`.`)
+- `--fix`: allow auto-format/fix where configured
+- `--strict`: fail on warnings where supported
 
 ## Pipeline
-1. **Format** — Run formatter (Prettier, Biome, etc.)
-2. **Lint** — Run linter (ESLint, Biome, etc.)
-3. **Type Check** — Run `tsc --noEmit` for TypeScript
-4. **Test** — Run test suite
-5. **Security Audit** — Check for secrets and vulnerabilities
-6. **Coverage Check** — Verify 80%+ threshold
+
+1. Detect language/tooling for target.
+2. Run formatter checks.
+3. Run lint/type checks when available.
+4. Produce a concise remediation list.
+
+## Notes
+
+This command mirrors hook behavior but is operator-invoked.
 
 ## Arguments
-- `[path|.]` — optional target path (default: current directory)
-- `--fix` — allow auto-format/fix
-- `--strict` — fail on warnings
 
-## Output
-Concise remediation list of all issues found, grouped by severity.
+$ARGUMENTS:
+- `[path|.]` optional target path
+- `--fix` optional
+- `--strict` optional

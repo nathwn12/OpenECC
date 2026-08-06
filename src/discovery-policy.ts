@@ -1,9 +1,13 @@
+function normalizeEol(content: string): string {
+  return content.replace(/\r\n/g, "\n").replace(/\r/g, "\n")
+}
+
 export function stripYamlFrontmatter(content: string): string {
-  return content.replace(/^---[\s\S]*?---\n/, "")
+  return normalizeEol(content).replace(/^---[\s\S]*?---\n/, "")
 }
 
 export function parseCommandFrontmatter(content: string): Record<string, unknown> {
-  const match = content.match(/^---\n([\s\S]*?)\n---/)
+  const match = normalizeEol(content).match(/^---\n([\s\S]*?)\n---/)
   if (!match) return {}
   const result: Record<string, unknown> = {}
   for (const line of match[1].split("\n")) {
@@ -20,7 +24,7 @@ export function parseCommandFrontmatter(content: string): Record<string, unknown
 }
 
 export function inferAgentDesc(name: string, prompt: string): string {
-  const firstLine = prompt.split("\n")[0]?.trim() || ""
+  const firstLine = normalizeEol(prompt).split("\n")[0]?.trim() || ""
   if (firstLine) {
     return firstLine.replace(/^You are an?\s+/i, "").replace(/\.$/, "")
   }

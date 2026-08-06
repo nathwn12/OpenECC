@@ -8,23 +8,32 @@ Plugin runs inside OpenCode (not standalone). `bun run bundle` is the only build
 |---------|------|
 | `bun install` | Install deps |
 | `bun run bundle` | Compiles `src/plugin.ts` → `.opencode/plugins/openecc.js` (Bun target, external `@opencode-ai/plugin`) |
-| `bun test` | 123 tests, 312 assertions across 4 test files |
+| `bun test` | 166 tests, 360 assertions across 7 test files |
 
 **Gotcha**: `tsconfig.outDir` says `dist/`, but actual output is `.opencode/plugins/openecc.js` (set in `package.json` `"main"` and `bundle` script). Do not rely on `dist/`.
 
-## Source Modules (11 files in `src/`)
+## Source Modules (16 files in `src/`)
 
 | Module | Purpose |
 |--------|---------|
 | `plugin.ts` | Entrypoint — config hook, system transforms, session hooks, command dispatch |
-| `discovery.ts` | Multi-source agent/command/skill scanner (openecc-bundled + global + workspace), priority-merged by name |
+| `plugin-support.ts` | System block builders — identity/runtime blocks, delegator role, project profile, compaction context |
+| `plugin-routing.ts` | First-user-message routing — plan gate application, delegation wiring |
+| `plugin-commands.ts` | Built-in command handling (`/plan`, `/instinct status`, others routed to templates) |
+| `plan-gate.ts` | Plan state machine orchestration, gate decisions, enforcement |
+| `plan-yaml.ts` | Plan YAML serialize/parse (plan-XXX.yaml files) |
+| `plan-store.ts` | Plan index/store I/O (`.opencode/index.json`, schema v3), file read/write/delete, migration |
+| `plan-policy.ts` | Plan rules — `VALID_TRANSITIONS`, scope/intent classification, drift check, tool access + gate block builders |
 | `model-routing.ts` | Loads `openecc.json`, assigns per-agent models, auto-heals if missing or invalid |
-| `plan-gate.ts` | Plan state machine, intent/scope classification, drift detection, quality assessment, tool access block builder |
-| `execution.ts` | Attempt counter, struggle detection, execution context block |
-| `identity.ts` | Package root, version, skills directory resolution |
+| `model-routing-policy.ts` | Model routing policy — default config generation, agent list population, config application |
+| `memory.ts` | SQLite FTS5 memory store, schema migration, recall/status tools, session lifecycle hooks |
 | `instinct.ts` | Pattern learning, instinct YAML parse/query, status table builder |
+| `identity.ts` | Package root, version, skills directory resolution |
+| `execution.ts` | Attempt counter, struggle detection, execution context block |
+| `discovery.ts` | Multi-source agent/command/skill scanner (openecc-bundled + global + workspace), priority-merged by name |
+| `discovery-policy.ts` | Discovery policy — frontmatter parsing, agent description/permission inference, name-based merging |
 
-Test files: `plan-gate.test.ts`, `model-routing.test.ts`, `discovery.test.ts`, `instinct.test.ts`
+Test files: `plan-gate.test.ts`, `model-routing.test.ts`, `discovery.test.ts`, `instinct.test.ts`, `memory.test.ts`, `execution.test.ts`, `plugin-support.test.ts`
 
 ## How the Plugin Works
 
@@ -47,7 +56,9 @@ The plugin scans **three sources** per type, priority-merged by name (openecc-bu
 
 Results cached per session. `clearDiscoveryCache()` resets for tests.
 
-Currently: 18 agents, 28 commands, 11 skills.
+Currently: 30 agents, 35 commands, 13 skills.
+
+`discovery-policy.ts` normalizes CRLF/mixed line endings so command frontmatter and agent routing parse reliably on Windows (regression-tested).
 
 ## Model Routing (`openecc.json`)
 

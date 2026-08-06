@@ -4,17 +4,30 @@ description: "Check autonomous agent loop status and history"
 
 # Loop Status Command
 
-Check loop status for: $ARGUMENTS
+Inspect active loop state, progress, and failure signals.
 
-## Your Task
-1. Report current loop state (running, idle, stopped)
-2. Show iteration history:
-   - Iteration number
-   - Phase completed
-   - Result
-   - Duration
-3. Show accumulated instincts from loop sessions
-4. Show verification pass/fail trend
+## Usage
+
+`/loop-status [--watch]`
+
+## What to Report
+
+- active loop pattern
+- current phase and last successful checkpoint
+- failing checks (if any)
+- accumulated instincts from loop sessions
+- verification pass/fail trend
+- estimated time/cost drift
+- recommended intervention (continue/pause/stop)
+
+## Watch Mode
+
+When `--watch` is present, refresh status periodically and surface state changes.
+
+## Arguments
+
+$ARGUMENTS:
+- `--watch` optional
 
 ---
 

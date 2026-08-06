@@ -55,11 +55,16 @@ function getPackageInfo() {
 }
 
 // src/discovery-policy.ts
+function normalizeEol(content) {
+  return content.replace(/\r\n/g, `
+`).replace(/\r/g, `
+`);
+}
 function stripYamlFrontmatter(content) {
-  return content.replace(/^---[\s\S]*?---\n/, "");
+  return normalizeEol(content).replace(/^---[\s\S]*?---\n/, "");
 }
 function parseCommandFrontmatter(content) {
-  const match = content.match(/^---\n([\s\S]*?)\n---/);
+  const match = normalizeEol(content).match(/^---\n([\s\S]*?)\n---/);
   if (!match)
     return {};
   const result = {};
@@ -80,7 +85,7 @@ function parseCommandFrontmatter(content) {
   return result;
 }
 function inferAgentDesc(name, prompt) {
-  const firstLine = prompt.split(`
+  const firstLine = normalizeEol(prompt).split(`
 `)[0]?.trim() || "";
   if (firstLine) {
     return firstLine.replace(/^You are an?\s+/i, "").replace(/\.$/, "");

@@ -8,6 +8,7 @@ You are a **subagent**. Analyze and recommend improvements. Edit config files wh
 2. **Cost Optimization** — Reduce token usage and API call overhead
 3. **Throughput** — Parallelize independent work and reduce latency
 4. **Configuration Audit** — Review and improve harness/agent config files
+5. **Baseline & Validation** — Run `/harness-audit` to baseline, then measure before/after deltas
 
 ## Analysis Areas
 
@@ -52,6 +53,19 @@ parallel:
   - task: analyze backend
   - task: lint frontend
 ```
+
+## Measurement
+Report improvements with measurable deltas:
+- baseline: overall_score/max_score + category scores (e.g., security_score, cost_score) + top_actions
+- applied changes: top_actions (array of action objects)
+- measured improvements: category score deltas using same category keys
+- remaining_risks: clear list of remaining risks
+
+## Constraints
+- Prefer small changes with measurable effect.
+- Preserve cross-platform behavior.
+- Avoid introducing fragile shell quoting.
+- Keep compatibility across Claude Code, Cursor, OpenCode, and Codex.
 
 ## Checklist
 - [ ] Tool timeouts reviewed and appropriate

@@ -1,20 +1,23 @@
 ---
 description: "Promote project instincts to global scope"
+agent: build
 ---
 
 # Promote Command
 
-Promote instincts to global for: $ARGUMENTS
+Promote instincts in continuous-learning-v2: $ARGUMENTS
 
 ## Your Task
-1. Select instincts tagged for promotion
-2. Copy from `.opencode/instincts/` to global instincts directory
-3. Add attribution metadata (source project, promotion date)
-4. Promote strategies:
-   - **Apply to all projects** — Useful universally (e.g., commit style)
-   - **Apply conditionally** — Tag for project type discovery
-5. Report promotion summary
 
----
+Run:
 
-**TIP**: Promote sparingly — global instincts affect behavior across all projects.
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/skills/continuous-learning-v2/scripts/instinct-cli.py" promote $ARGUMENTS
+```
+
+If `CLAUDE_PLUGIN_ROOT` is unavailable, use:
+
+```bash
+python3 ~/.claude/skills/continuous-learning-v2/scripts/instinct-cli.py promote $ARGUMENTS
+```
+

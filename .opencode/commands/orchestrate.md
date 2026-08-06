@@ -27,8 +27,28 @@ Orchestrate specialized agents for: $ARGUMENTS
 | build-error-resolver | Build fixes | TypeScript/build errors |
 | e2e-runner | E2E testing | User flow testing |
 | doc-updater | Documentation | Updating docs |
+| docs-lookup | Docs research | Library/API lookups |
 | refactor-cleaner | Code cleanup | Dead code removal |
 | database-reviewer | Database | Query optimization |
+| loop-operator | Autonomous loops | Monitor/steer long loops |
+| harness-optimizer | Harness config | Reliability/cost tuning |
+| search-agent | Codebase search | Find code by intent |
+| go-reviewer | Go | Go-specific review |
+| go-build-resolver | Go | Go build errors |
+| cpp-reviewer | C++ | C++ review |
+| cpp-build-resolver | C++ | C++ build errors |
+| java-reviewer | Java | Java/Spring review |
+| java-build-resolver | Java | Java/Maven/Gradle builds |
+| kotlin-reviewer | Kotlin | Kotlin/Android review |
+| kotlin-build-resolver | Kotlin | Kotlin/Gradle builds |
+| php-reviewer | PHP | PHP/Laravel review |
+| python-reviewer | Python | Python review |
+| rust-reviewer | Rust | Rust review |
+| rust-build-resolver | Rust | Rust/Cargo builds |
+| plan-ceo-reviewer | Plan QA | Plan business-value review |
+| plan-design-reviewer | Plan QA | Plan design review |
+| plan-devex-reviewer | Plan QA | Plan developer-experience review |
+| plan-eng-reviewer | Plan QA | Plan engineering review |
 
 ## Orchestration Patterns
 

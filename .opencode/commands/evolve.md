@@ -1,23 +1,36 @@
 ---
-description: "Cluster related instincts into formal agent skills"
+description: "Analyze instincts and suggest or generate evolved structures"
+agent: build
 ---
 
 # Evolve Command
 
-Cluster instincts into skills: $ARGUMENTS
+Analyze and evolve instincts in continuous-learning-v2: $ARGUMENTS
 
-## Evolution Workflow
-1. **Cluster** — Group related instincts by domain/topic
-2. **Generalize** — Extract common workflow from clustered instincts
-3. **Generate** — Create skill files in `.opencode/skills/`
-4. **Map** — Create command templates in `.opencode/commands/`
-5. **Deprecate** — Mark source instincts as `evolved`
+## Your Task
 
-## Output
-- `N` new skill files with consolidated workflows
-- Changed instinct statuses
-- Remapping of commands to skills
+Run:
 
----
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/skills/continuous-learning-v2/scripts/instinct-cli.py" evolve $ARGUMENTS
+```
 
-**TIP**: Evolve when you have 5+ instincts in the same domain — that signals a repeatable workflow.
+If `CLAUDE_PLUGIN_ROOT` is unavailable, use:
+
+```bash
+python3 ~/.claude/skills/continuous-learning-v2/scripts/instinct-cli.py evolve $ARGUMENTS
+```
+
+## Supported Args (v2.1)
+
+- no args: analysis only
+- `--generate`: also generate files under `evolved/{skills,commands,agents}`
+
+## Behavior Notes
+
+- Uses project + global instincts for analysis.
+- Shows skill/command/agent candidates from trigger and domain clustering.
+- Shows project -> global promotion candidates.
+- With `--generate`, output path is:
+  - project context: `~/.claude/homunculus/projects/<project-id>/evolved/`
+  - global fallback: `~/.claude/homunculus/evolved/`

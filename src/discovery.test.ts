@@ -237,3 +237,49 @@ describe("discovery caching", () => {
     expect(cmds.length).toBeGreaterThanOrEqual(20)
   })
 })
+
+// ── CRLF Robustness Tests ───────────────────────────────────────────────────
+
+describe("CRLF line-ending robustness", () => {
+  beforeEach(() => {
+    clearDiscoveryCache()
+    tmpDir = tmpRoot()
+  })
+
+  afterEach(() => {
+    try { fs.rmSync(tmpDir, { recursive: true, force: true }) } catch {}
+  })
+
+  it("parses command frontmatter with CRLF line endings", () => {
+    const cmdDir = testDir(".opencode", "commands")
+    const crlf = "---\r\ndescription: \"CRLF command\"\r\nagent: planner\r\nsubtask: true\r\n---\r\n\r\nRun the planner.\r\n"
+    fs.writeFileSync(path.join(cmdDir, "crlf-cmd.md"), crlf, "utf8")
+    const cmds = discoverCommands(tmpDir)
+    const cmd = cmds.find((c) => c.name === "crlf-cmd")
+    expect(cmd).toBeDefined()
+    expect(cmd!.desc).toBe("CRLF command")
+    expect(cmd!.agent).toBe("planner")
+    expect(cmd!.subtask).toBe(true)
+  })
+
+  it("strips CRLF frontmatter from command templates", () => {
+    const cmdDir = testDir(".opencode", "commands")
+    const crlf = "---\r\ndescription: CRLF command\r\n---\r\n\r\n# Body\r\nActual template here.\r\n"
+    fs.writeFileSync(path.join(cmdDir, "crlf-body.md"), crlf, "utf8")
+    const cmds = discoverCommands(tmpDir)
+    const cmd = cmds.find((c) => c.name === "crlf-body")
+    expect(cmd).toBeDefined()
+    expect(cmd!.template).toContain("Actual template here.")
+    expect(cmd!.template).not.toContain("description:")
+  })
+
+  it("derives agent descriptions from CRLF prompts without trailing carriage returns", () => {
+    const agDir = testDir(".opencode", "prompts", "agents")
+    fs.writeFileSync(path.join(agDir, "crlf-agent.txt"), "You are a CRLF agent.\r\nDo things.\r\n", "utf8")
+    const agents = discoverAgents(tmpDir)
+    const agent = agents.find((a) => a.name === "crlf-agent")
+    expect(agent).toBeDefined()
+    expect(agent!.desc).toBe("CRLF agent")
+    expect(agent!.desc.endsWith("\r")).toBe(false)
+  })
+})

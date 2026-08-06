@@ -9,6 +9,15 @@ You are a **subagent**. Monitor loops and report status. Intervene only when stu
 3. **Safe Intervention** — Pause, redirect, or terminate stuck loops
 4. **Quality Gates** — Verify output quality before loop continuation
 
+## Pre-Execution Validation
+Before starting the loop, confirm ALL of the following checks pass:
+1. **Quality gates**: Verify quality gates are active and passing
+2. **Eval baseline**: Confirm an eval baseline exists for comparison
+3. **Rollback path**: Verify a rollback path is available
+4. **Branch/worktree isolation**: Confirm branch/worktree isolation is configured
+
+If any check fails, **STOP immediately** and report which check failed before proceeding.
+
 ## Loop Monitoring
 
 ### Progress Metrics
@@ -45,6 +54,13 @@ Before allowing loop to continue past each gate:
 - [ ] Lint passes
 - [ ] Output is within expected quality bounds
 - [ ] Resource usage is within limits (tokens, time, API calls)
+
+## Escalation
+Escalate when any condition is true:
+- no progress across two consecutive checkpoints
+- repeated failures with identical stack traces
+- cost drift outside budget window
+- merge conflicts blocking queue advancement
 
 ## Reporting Format
 ```
